@@ -7,13 +7,12 @@ import (
 	"regexp"
 	"strings"
 
-	"gopkg.in/yaml.v2"
-
 	"github.com/go-logr/logr"
 	"github.com/konveyor/analyzer-lsp/engine"
 	"github.com/konveyor/analyzer-lsp/engine/labels"
 	"github.com/konveyor/analyzer-lsp/output/v1/konveyor"
 	"github.com/konveyor/analyzer-lsp/provider"
+	"gopkg.in/yaml.v2"
 )
 
 const (
@@ -91,6 +90,7 @@ func (r *RuleParser) LoadRules(filepath string) ([]engine.RuleSet, map[string]pr
 	if info.Mode().IsRegular() {
 		rules, m, err := r.LoadRule(filepath)
 		if err != nil {
+			r.Log.V(8).Error(err, "unable to load rule set")
 			return nil, nil, err
 		}
 
@@ -113,7 +113,6 @@ func (r *RuleParser) LoadRules(filepath string) ([]engine.RuleSet, map[string]pr
 	}
 	var ruleSet *engine.RuleSet
 	rules := []engine.Rule{}
-	foundTree := false
 	parserErr := &parserErrors{}
 	for _, f := range files {
 		info, err := os.Stat(path.Join(filepath, f.Name()))
@@ -122,7 +121,6 @@ func (r *RuleParser) LoadRules(filepath string) ([]engine.RuleSet, map[string]pr
 			continue
 		}
 		if info.IsDir() {
-			foundTree = true
 			r, m, err := r.LoadRules(path.Join(filepath, f.Name()))
 			if err != nil {
 				parserErr.errs = append(parserErr.errs, err)
@@ -141,6 +139,12 @@ func (r *RuleParser) LoadRules(filepath string) ([]engine.RuleSet, map[string]pr
 				ruleSet = r.loadRuleSet(filepath)
 				continue
 			}
+			// skip rule tests
+			if strings.HasSuffix(f.Name(), ".test.yaml") ||
+				strings.HasSuffix(f.Name(), ".test.yml") {
+				r.Log.V(7).Info("excluding test file from parsing", "file", f.Name())
+				continue
+			}
 			r, m, err := r.LoadRule(path.Join(filepath, f.Name()))
 			if err != nil {
 				parserErr.errs = append(parserErr.errs, err)
@@ -154,9 +158,6 @@ func (r *RuleParser) LoadRules(filepath string) ([]engine.RuleSet, map[string]pr
 		}
 	}
 
-	if ruleSet == nil && !foundTree {
-		return nil, nil, fmt.Errorf("unable to find %v", RULE_SET_GOLDEN_FILE_NAME)
-	}
 	if ruleSet != nil {
 		ruleSet.Rules = rules
 		ruleSets = append(ruleSets, *ruleSet)
@@ -171,6 +172,7 @@ func (r *RuleParser) LoadRules(filepath string) ([]engine.RuleSet, map[string]pr
 func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provider.InternalProviderClient, error) {
 	content, err := os.ReadFile(filepath)
 	if err != nil {
+		r.Log.V(8).Error(err, "filepath", filepath)
 		return nil, nil, err
 	}
 	// Determine if the content has a ruleset header.
@@ -180,7 +182,8 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 	// Assume that there is a rule set header.
 	err = yaml.Unmarshal(content, &ruleMap)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to convert file: %s to yaml", filepath)
+		r.Log.V(8).Info("unable to load rule set, failed to convert file to yaml -- skipping", "file", filepath, "error", err)
+		return nil, nil, nil
 	}
 
 	// rules that provide metadata
@@ -193,14 +196,16 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 	for _, ruleMap := range ruleMap {
 		ruleID, ok := ruleMap["ruleID"].(string)
 		if !ok {
+			r.Log.V(8).Info("ruleID not found", "file", filepath)
 			return nil, nil, fmt.Errorf("unable to find ruleID in rule")
 		}
 
 		if _, ok := ruleIDMap[ruleID]; ok {
+			r.Log.V(8).Info("duplicate ruleID", "file", filepath, "ruleID", ruleID)
 			return nil, nil, fmt.Errorf("duplicated rule id: %v", ruleID)
 		}
 		if e, ok := validateRuleID(ruleID); !ok {
-			r.Log.Info("invalid rule", "reason", e)
+			r.Log.Info("invalid rule", "reason", e, "ruleID", ruleID)
 			continue
 		}
 
@@ -215,6 +220,7 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 				case "message":
 					message, ok := val.(string)
 					if !ok {
+						r.Log.V(8).Info("message must be a string", "ruleID", ruleID)
 						return nil, nil, fmt.Errorf("message must be a string")
 					}
 
@@ -246,11 +252,13 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 				case "tag":
 					tagList, ok := val.([]interface{})
 					if !ok {
+						r.Log.V(8).Info("tag must be a list of strings", "ruleID", ruleID)
 						return nil, nil, fmt.Errorf("tag must be a list of strings")
 					}
 					for _, tagVal := range tagList {
 						tag, ok := tagVal.(string)
 						if !ok {
+							r.Log.V(8).Info("tag value must be a string", "ruleID", ruleID, "tag", tagVal)
 							return nil, nil, fmt.Errorf("tag value must be a string")
 						}
 						perform.Tag = append(perform.Tag, tag)
@@ -260,6 +268,7 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 		}
 
 		if err := perform.Validate(); err != nil {
+			r.Log.V(8).Error(err, "failed validating perform", "ruleID", ruleID, "file", filepath)
 			return nil, nil, err
 		}
 
@@ -274,6 +283,7 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 
 		whenMap, ok := ruleMap["when"].(map[interface{}]interface{})
 		if !ok {
+			r.Log.V(8).Info("a rule must have a single condition", "ruleID", ruleID, "file", filepath)
 			return nil, nil, fmt.Errorf("a Rule must have a single condition")
 		}
 
@@ -286,6 +296,7 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 			delete(whenMap, "from")
 			from, ok = fromRaw.(string)
 			if !ok {
+				r.Log.V(8).Info("a rule must have a single condition", "ruleID", ruleID, "file", filepath)
 				return nil, nil, fmt.Errorf("from must be a string literal, not %v", fromRaw)
 			}
 		}
@@ -294,6 +305,7 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 			delete(whenMap, "as")
 			as, ok = asRaw.(string)
 			if !ok {
+				r.Log.V(8).Info("as must be a string literal", "ruleID", ruleID, "file", filepath)
 				return nil, nil, fmt.Errorf("as must be a string literal, not %v", asRaw)
 			}
 		}
@@ -302,6 +314,7 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 			delete(whenMap, "ignore")
 			ignorable, ok = ignorableRaw.(bool)
 			if !ok {
+				r.Log.V(8).Info("ignore must be a boolean", "ruleID", ruleID, "file", filepath)
 				return nil, nil, fmt.Errorf("ignore must be a boolean, not %v", ignorableRaw)
 			}
 		}
@@ -313,6 +326,7 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 			delete(whenMap, "not")
 			not, ok = notKeywordRaw.(bool)
 			if !ok {
+				r.Log.V(8).Info("not must be a boolean", "ruleID", ruleID, "file", filepath)
 				return nil, nil, fmt.Errorf("not must be a boolean, not %v", notKeywordRaw)
 			}
 		}
@@ -321,6 +335,7 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 		for k, value := range whenMap {
 			key, ok := k.(string)
 			if !ok {
+				r.Log.V(8).Info("condition key must be a string", "ruleID", ruleID, "file", filepath)
 				return nil, nil, fmt.Errorf("condition key must be a string")
 			}
 			switch key {
@@ -328,10 +343,12 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 				//Handle when clause
 				m, ok := value.([]interface{})
 				if !ok {
+					r.Log.V(8).Info("invalid type for or clause, must be an array", "ruleID", ruleID, "file", filepath)
 					return nil, nil, fmt.Errorf("invalid type for or clause, must be an array")
 				}
 				conditions, provs, err := r.getConditions(m)
 				if err != nil {
+					r.Log.V(8).Error(err, "failed parsing conditions in or clause", "ruleID", ruleID, "file", filepath)
 					return nil, nil, err
 				}
 				if len(conditions) == 0 {
@@ -355,10 +372,12 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 				//Handle when clause
 				m, ok := value.([]interface{})
 				if !ok {
+					r.Log.V(8).Info("invalid type for and clause, must be an array", "ruleID", ruleID, "file", filepath)
 					return nil, nil, fmt.Errorf("invalid type for and clause, must be an array")
 				}
 				conditions, provs, err := r.getConditions(m)
 				if err != nil {
+					r.Log.V(8).Error(err, "failed parsing conditions in and clause", "ruleID", ruleID, "file", filepath)
 					return nil, nil, err
 				}
 				if len(conditions) == 0 {
@@ -378,21 +397,29 @@ func (r *RuleParser) LoadRule(filepath string) ([]engine.Rule, map[string]provid
 					}
 				}
 			case "":
+				r.Log.V(8).Info("must have at least one condition", "ruleID", ruleID, "file", filepath)
 				return nil, nil, fmt.Errorf("must have at least one condition")
 			default:
 				// Handle provider
 				s := strings.Split(key, ".")
 				if len(s) != 2 {
+					r.Log.V(8).Info("condition must be of the form {provider}.{capability}", "ruleID", ruleID, "file", filepath)
 					return nil, nil, fmt.Errorf("condition must be of the form {provider}.{capability}")
 				}
 				providerKey, capability := s[0], s[1]
 
 				condition, provider, err := r.getConditionForProvider(providerKey, capability, value)
 				if err != nil {
+					r.Log.V(8).Error(err, "failed parsing conditions for provider",
+						"provider", providerKey, "capability", capability, "ruleID", ruleID, "file", filepath)
 					return nil, nil, err
 				}
 				if condition == nil {
 					continue
+				}
+
+				if providerKey == "builtin" && capability == "hasTags" {
+					rule.UsesHasTags = true
 				}
 
 				c := engine.ConditionEntry{
@@ -552,6 +579,7 @@ func (r *RuleParser) getConditions(conditionsInterface []interface{}) ([]engine.
 	conditions := []engine.ConditionEntry{}
 	providers := map[string]provider.InternalProviderClient{}
 	chainNameToIndex := map[string]int{}
+	asFound := []string{}
 	for _, conditionInterface := range conditionsInterface {
 		// get map from interface
 		conditionMap, ok := conditionInterface.(map[interface{}]interface{})
@@ -681,15 +709,25 @@ func (r *RuleParser) getConditions(conditionsInterface []interface{}) ([]engine.
 				}
 				providers[providerKey] = provider
 			}
-			if ce.As != "" {
+			if ce.From != "" && ce.As != "" && ce.From == ce.As {
+				return nil, nil, fmt.Errorf("condition cannot have the same value for fields 'from' and 'as'")
+			} else if ce.As != "" {
+				for _, as := range asFound {
+					if as == ce.As {
+						return nil, nil, fmt.Errorf("condition cannot have multiple 'as' fields with the same name")
+					}
+				}
+				asFound = append(asFound, ce.As)
+
 				index, ok := chainNameToIndex[ce.As]
 				if !ok {
 					//prepend
 					conditions = append([]engine.ConditionEntry{ce}, conditions...)
+				} else {
+					//insert
+					conditions = append(conditions[:index+1], conditions[index:]...)
+					conditions[index] = ce
 				}
-				//insert
-				conditions = append(conditions[:index+1], conditions[index:]...)
-				conditions[index] = ce
 			} else if ce.From != "" && ce.As == "" {
 				chainNameToIndex[ce.From] = len(conditions)
 				conditions = append(conditions, ce)
@@ -706,7 +744,7 @@ func (r *RuleParser) getConditionForProvider(langProvider, capability string, va
 	// Here there can only be a single provider.
 	client, ok := r.ProviderNameToClient[langProvider]
 	if !ok {
-		return nil, nil, fmt.Errorf("unable to find provider for :%v", langProvider)
+		return nil, nil, fmt.Errorf("unable to find provider for: %v", langProvider)
 	}
 
 	if !provider.HasCapability(client.Capabilities(), capability) {
@@ -724,22 +762,21 @@ func (r *RuleParser) getConditionForProvider(langProvider, capability string, va
 
 	if capability == "dependency" && !r.NoDependencyRules {
 		depCondition := provider.DependencyCondition{
-			Client:        client,
-			LabelSelector: r.DepLabelSelector,
+			Client: client,
 		}
 
 		fullCondition, ok := value.(map[interface{}]interface{})
 		if !ok {
-			return nil, nil, fmt.Errorf("Unable to parse dependency condition for %s", langProvider)
+			return nil, nil, fmt.Errorf("unable to parse dependency condition for %s", langProvider)
 		}
 		for k, v := range fullCondition {
 			key, ok := k.(string)
 			if !ok {
-				return nil, nil, fmt.Errorf("Unable to parse dependency condition for %s", langProvider)
+				return nil, nil, fmt.Errorf("unable to parse dependency condition for %s", langProvider)
 			}
 			value, ok := v.(string)
 			if !ok {
-				return nil, nil, fmt.Errorf("Unable to parse dependency condition for %s", langProvider)
+				return nil, nil, fmt.Errorf("unable to parse dependency condition for %s", langProvider)
 			}
 			switch key {
 			case "name":
@@ -759,11 +796,11 @@ func (r *RuleParser) getConditionForProvider(langProvider, capability string, va
 
 		}
 		if depCondition.Name == "" {
-			return nil, nil, fmt.Errorf("Unable to parse dependency condition for %s (name is required)", langProvider)
+			return nil, nil, fmt.Errorf("unable to parse dependency condition for %s (name is required)", langProvider)
 		}
 
 		if depCondition.Upperbound == "" && depCondition.Lowerbound == "" {
-			return nil, nil, fmt.Errorf("Unable to parse dependency condition for %s (one of upperbound or lowerbound is required)", langProvider)
+			return nil, nil, fmt.Errorf("unable to parse dependency condition for %s (one of upperbound or lowerbound is required)", langProvider)
 		}
 
 		return &depCondition, client, nil

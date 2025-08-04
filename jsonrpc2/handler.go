@@ -6,6 +6,9 @@ package jsonrpc2
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 )
 
 // Handler is the interface used to hook into the message handling of an rpc
@@ -99,3 +102,45 @@ func (EmptyHandler) Wrote(ctx context.Context, bytes int64) context.Context {
 func (EmptyHandler) Error(ctx context.Context, err error) {}
 
 type defaultHandler struct{ EmptyHandler }
+
+// Handler that logs all events to a file. Usually used with os.Stderr or
+// os.Stdout
+type FileHandler struct {
+	File *os.File
+}
+
+func (f FileHandler) Cancel(ctx context.Context, conn *Conn, id ID, cancelled bool) bool {
+	return false
+}
+
+func (f FileHandler) Request(ctx context.Context, conn *Conn, direction Direction, r *WireRequest) context.Context {
+	b, _ := json.Marshal(r)
+
+	fmt.Fprintf(f.File, "conn %p response %s:\n%s\n\n",
+		conn, direction.String(), string(b),
+	)
+
+	return ctx
+}
+
+func (f FileHandler) Response(ctx context.Context, conn *Conn, direction Direction, r *WireResponse) context.Context {
+	b, _ := json.Marshal(r)
+
+	fmt.Fprintf(f.File, "conn %p response %s:\n%s\n\n",
+		conn, direction.String(), string(b),
+	)
+
+	return ctx
+}
+
+func (f FileHandler) Done(ctx context.Context, err error) {}
+
+func (f FileHandler) Read(ctx context.Context, bytes int64) context.Context {
+	return ctx
+}
+
+func (f FileHandler) Wrote(ctx context.Context, bytes int64) context.Context {
+	return ctx
+}
+
+func (f FileHandler) Error(ctx context.Context, err error) {}

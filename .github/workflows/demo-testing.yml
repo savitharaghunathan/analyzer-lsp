@@ -1,42 +1,145 @@
 name: Demo Testing
 
-on: ["push", "pull_request"]
+on:
+  pull_request:
+  push:
+    branches:
+    - "main"
+    - "release-*"
+    - "v*"
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      api_tests_ref: ${{ steps.extract-info.outputs.API_TESTS_REF }}
+      tackle2_hub_tag: ${{ steps.extract-info.outputs.TACKLE2_HUB_TAG }}
     steps:
+      - name: Extract pull request number from inputs or PR description
+        id: extract-info
+        env:
+          PULL_REQUEST_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          echo "IMG_JAVA_PROVIDER=ttl.sh/konveyor-java-external-provider-${GITHUB_SHA}:2h" >>$GITHUB_OUTPUT
+          echo "IMG_DOTNET_PROVIDER=ttl.sh/konveyor-dotnet-external-provider-${GITHUB_SHA}:2h" >>$GITHUB_OUTPUT
+          echo "IMG_GENERIC_PROVIDER=ttl.sh/konveyor-generic-external-provider-${GITHUB_SHA}:2h" >>$GITHUB_OUTPUT
+
+          echo "BUILD_BUNDLE=false" >> $GITHUB_OUTPUT
+          # if this is a PR, we should use the base branch
+          # else, use the branch on which this is running
+          if [ ! -z ${GITHUB_BASE_REF} ]; then 
+              echo "Using ${GITHUB_BASE_REF}"
+              echo "API_TESTS_REF=${GITHUB_BASE_REF}" >> $GITHUB_OUTPUT
+              echo "ADDON_REF=${GITHUB_BASE_REF}" >>$GITHUB_OUTPUT
+              echo "JAVA_BUNDLE_REF=${GITHUB_BASE_REF}" >>$GITHUB_OUTPUT
+              echo "BUNDLE_IMAGE_TAG=${GITHUB_BASE_REF/main/latest}" >>$GITHUB_OUTPUT
+              echo "TACKLE2_HUB_TAG=${GITHUB_BASE_REF/main/latest}" >> $GITHUB_OUTPUT
+          else
+              echo "Using ${GITHUB_REF_NAME}"
+              echo "API_TESTS_REF=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+              echo "ADDON_REF=${GITHUB_REF_NAME}" >>$GITHUB_OUTPUT
+              echo "JAVA_BUNDLE_REF=${GITHUB_REF_NAME}" >>$GITHUB_OUTPUT
+              echo "BUNDLE_IMAGE_TAG=${GITHUB_REF_NAME/main/latest}" >>$GITHUB_OUTPUT
+              echo "TACKLE2_HUB_TAG=${GITHUB_REF_NAME/main/latest}" >> $GITHUB_OUTPUT
+          fi
+          
+          # override with explicitely set value in PR description
+          echo "${PULL_REQUEST_BODY}"
+          ADDON_PULL_REQUEST_NUMBER=$(echo "${PULL_REQUEST_BODY}" | grep -oP '[A|a]ddon [P|p][R|r]: \K\d+' || true)
+          if [ ! -z "$ADDON_PULL_REQUEST_NUMBER" ]; then
+            echo "Using pull/${ADDON_PULL_REQUEST_NUMBER} for addon"
+            echo "ADDON_REF=refs/pull/$ADDON_PULL_REQUEST_NUMBER/merge" >>$GITHUB_OUTPUT
+          fi
+
+          JAVA_BUNDLE_PR_NUMBER=$(echo "${PULL_REQUEST_BODY}" | grep -oP '[B|b]undle [P|p][R|r]: \K\d+' || true)
+          if [ ! -z "$JAVA_BUNDLE_PR_NUMBER" ]; then
+            echo "Using bundle PR pull/${JAVA_BUNDLE_PR_NUMBER}"
+            echo "JAVA_BUNDLE_REF=refs/pull/$JAVA_BUNDLE_PR_NUMBER/merge" >> $GITHUB_OUTPUT
+            echo "BUILD_BUNDLE=true" >>$GITHUB_OUTPUT
+            echo "BUNDLE_IMAGE_TAG=latest" >>$GITHUB_OUTPUT
+          fi
+
+      - uses: actions/checkout@v3
+        if: steps.extract-info.outputs.BUILD_BUNDLE == 'true'
+        with:
+          fetch-depth: 0
+          repository: konveyor/java-analyzer-bundle
+          ref: "${{ steps.extract-info.outputs.JAVA_BUNDLE_REF }}"
+          path: java-analyzer-bundle
+      
+      - name: build java analyzer bundle image
+        if: steps.extract-info.outputs.BUILD_BUNDLE == 'true'
+        working-directory: java-analyzer-bundle
+        run: |
+          podman build -t quay.io/konveyor/jdtls-server-base:latest -f Dockerfile .
+
       - uses: actions/checkout@v3
 
-      - name: build image
-        run: podman build -t quay.io/konveyor/analyzer-lsp:latest .
-
-      - name: build demo image
-        run: podman build -f demo.Dockerfile -t localhost/testing:latest
-
-      - name: run demo image and ensure violations output unchanged
+      # build all provider images and the analyzer-lsp image
+      - name: build images
         run: |
-          podman run -v $(pwd)/demo-output.yaml:/analyzer-lsp/output.yaml:Z localhost/testing:latest
-          git diff --exit-code demo-output.yaml
+          make \
+            IMG_JAVA_PROVIDER=${{steps.extract-info.outputs.IMG_JAVA_PROVIDER }}\
+            IMG_DOTNET_PROVIDER=${{steps.extract-info.outputs.IMG_DOTNET_PROVIDER  }}\
+            IMG_GENERIC_PROVIDER=${{steps.extract-info.outputs.IMG_GENERIC_PROVIDER }}\
+            TAG_JAVA_BUNDLE=${{steps.extract-info.outputs.BUNDLE_IMAGE_TAG}}\
+            build-external
+          podman build --build-arg JAVA_BUNDLE_TAG=${{steps.extract-info.outputs.BUNDLE_IMAGE_TAG}} -t quay.io/konveyor/analyzer-lsp:latest -f Dockerfile .
 
-      - name: run demo image and ensure dependency output unchanged
+      # run the demo in a podman pod
+      - name: run demo image
+        run : |
+          make \
+            IMG_JAVA_PROVIDER=${{steps.extract-info.outputs.IMG_JAVA_PROVIDER }}\
+            IMG_DOTNET_PROVIDER=${{steps.extract-info.outputs.IMG_DOTNET_PROVIDER  }}\
+            IMG_GENERIC_PROVIDER=${{steps.extract-info.outputs.IMG_GENERIC_PROVIDER }}\
+            run-external-providers-pod
+          podman build -f demo-local.Dockerfile -t localhost/testing:latest
+          make run-demo-image
+      
+      - name: install yq for testing
+        run: go install github.com/mikefarah/yq/v4@latest
+
+      - name: ensure violation and dependency outputs are unchanged
         run: |
-          podman run --entrypoint /usr/bin/konveyor-analyzer-dep -v $(pwd)/demo-dep-output.yaml:/analyzer-lsp/demo-dep-output.yaml:Z localhost/testing:latest --output-file=demo-dep-output.yaml
-          git diff --exit-code demo-dep-output.yaml
+          diff \
+            <(yq -P 'sort_keys(..)' -o=props <(git show HEAD:demo-output.yaml)) \
+            <(yq -P 'sort_keys(..)' -o=props <(cat demo-output.yaml))
+          diff \
+            <(yq -P 'sort_keys(..)' -o=props <(git show HEAD:demo-dep-output.yaml)) \
+            <(yq -P 'sort_keys(..)' -o=props <(cat demo-dep-output.yaml))
 
-      - name: save image
-        run: |
-          podman save -o /tmp/analyzer-lsp.tar quay.io/konveyor/analyzer-lsp:latest
-
-      - name: Upload image as artifact
-        uses: actions/upload-artifact@v3
+      - uses: actions/checkout@v3
         with:
-          name: analyzer-lsp
-          path: /tmp/analyzer-lsp.tar
-          retention-days: 1
+          fetch-depth: 0
+          repository: konveyor/tackle2-addon-analyzer
+          ref: ${{ steps.extract-info.outputs.ADDON_REF }}
+          path: tackle2-addon-analyzer
 
+      - name: Build addon and push images
+        working-directory: tackle2-addon-analyzer
+        run: |
+          IMG=ttl.sh/konveyor-tackle2-addon-analyzer-${GITHUB_SHA}:2h make image-podman
+          podman push ttl.sh/konveyor-tackle2-addon-analyzer-${GITHUB_SHA}:2h
+          podman push ${{steps.extract-info.outputs.IMG_JAVA_PROVIDER }}
+          podman push ${{steps.extract-info.outputs.IMG_DOTNET_PROVIDER  }}
+          podman push ${{steps.extract-info.outputs.IMG_GENERIC_PROVIDER }}
+      
+      - name: Make bundle image
+        uses: konveyor/operator/.github/actions/make-bundle@main
+        with:
+          operator_bundle: ttl.sh/konveyor-operator-bundle-${{ github.sha}}:2h
+          addon_analyzer: ttl.sh/konveyor-tackle2-addon-analyzer-${{ github.sha}}:2h
+          tackle_hub: "quay.io/konveyor/tackle2-hub:${{ steps.extract-info.outputs.TACKLE2_HUB_TAG }}"
+          provider_generic: ${{steps.extract-info.outputs.IMG_GENERIC_PROVIDER }}
+          provider_java: ${{steps.extract-info.outputs.IMG_JAVA_PROVIDER }}
+      - name: push bundle image 
+        run: |
+          docker push ttl.sh/konveyor-operator-bundle-${GITHUB_SHA}:2h
   e2e:
     needs: test
-    uses: konveyor/ci/.github/workflows/global-ci.yml@main
+    uses: konveyor/ci/.github/workflows/global-ci-bundle.yml@main
     with:
-      component_name: analyzer-lsp
+      operator_bundle: ttl.sh/konveyor-operator-bundle-${{ github.sha }}:2h
+      tackle_hub: "quay.io/konveyor/tackle2-hub:${{ needs.test.outputs.tackle2_hub_tag }}"
+      api_tests_ref: "${{ needs.test.outputs.api_tests_ref }}"

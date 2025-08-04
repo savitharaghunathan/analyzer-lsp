@@ -2,5 +2,6 @@
 
 * [Providers](./providers.md)
 * [Rules](./rules.md)
-* [Violations](./violations.md)
+* [Output](./output.md)
 * [Rule Labels](./labels.md)
+* [Incident Selectors](incident_selector.md)

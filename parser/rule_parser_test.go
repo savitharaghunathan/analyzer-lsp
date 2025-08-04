@@ -24,24 +24,28 @@ func (t testProvider) Capabilities() []provider.Capability {
 	return t.caps
 }
 
-func (t testProvider) Init(ctx context.Context, log logr.Logger, config provider.InitConfig) (provider.ServiceClient, error) {
-	return nil, nil
+func (t testProvider) Init(ctx context.Context, log logr.Logger, config provider.InitConfig) (provider.ServiceClient, provider.InitConfig, error) {
+	return nil, provider.InitConfig{}, nil
 }
 
-func (t testProvider) Evaluate(cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
+func (t testProvider) Evaluate(ctx context.Context, cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
 	return provider.ProviderEvaluateResponse{}, nil
 }
 
-func (t testProvider) GetDependencies() (map[uri.URI][]*provider.Dep, error) {
-	return nil, nil
-}
-
-func (t testProvider) GetDependenciesDAG() (map[uri.URI][]provider.DepDAGItem, error) {
-	return nil, nil
-}
-
-func (t testProvider) ProviderInit(context.Context) error {
+func (t testProvider) NotifyFileChanges(ctx context.Context, changes ...provider.FileChange) error {
 	return nil
+}
+
+func (t testProvider) GetDependencies(ctx context.Context) (map[uri.URI][]*provider.Dep, error) {
+	return nil, nil
+}
+
+func (t testProvider) GetDependenciesDAG(ctx context.Context) (map[uri.URI][]provider.DepDAGItem, error) {
+	return nil, nil
+}
+
+func (t testProvider) ProviderInit(context.Context, []provider.InitConfig) ([]provider.InitConfig, error) {
+	return nil, nil
 }
 
 func (t testProvider) Stop() {}
@@ -146,6 +150,7 @@ func TestLoadRules(t *testing.T) {
 									},
 								},
 							},
+							When: engine.ConditionEntry{},
 						},
 					},
 				},
@@ -183,6 +188,7 @@ func TestLoadRules(t *testing.T) {
 								Category:    &konveyor.Potential,
 							},
 							Perform: engine.Perform{Message: engine.Message{Text: &allGoFiles, Links: []konveyor.Link{}}},
+							When:    engine.ConditionEntry{},
 						},
 					},
 				},
@@ -256,6 +262,7 @@ func TestLoadRules(t *testing.T) {
 								Category:    &konveyor.Potential,
 							},
 							Perform: engine.Perform{Message: engine.Message{Text: &allGoAndJsonFiles, Links: []konveyor.Link{}}},
+							When:    engine.ConditionEntry{},
 						},
 					},
 				},
@@ -293,6 +300,7 @@ func TestLoadRules(t *testing.T) {
 								Category:    &konveyor.Potential,
 							},
 							Perform: engine.Perform{Message: engine.Message{Text: &allGoOrJsonFiles, Links: []konveyor.Link{}}},
+							When:    engine.ConditionEntry{},
 						},
 					},
 				},
@@ -330,6 +338,7 @@ func TestLoadRules(t *testing.T) {
 								Category:    &konveyor.Potential,
 							},
 							Perform: engine.Perform{Message: engine.Message{Text: &allGoOrJsonFiles, Links: []konveyor.Link{}}},
+							When:    engine.ConditionEntry{},
 						},
 					},
 				},
@@ -353,7 +362,7 @@ func TestLoadRules(t *testing.T) {
 				},
 			},
 			ShouldErr:    true,
-			ErrorMessage: "unable to find provider for :builtin",
+			ErrorMessage: "unable to find provider for: builtin",
 		},
 		{
 			Name:         "rule no conditions",
@@ -406,6 +415,7 @@ func TestLoadRules(t *testing.T) {
 								Category:    &konveyor.Potential,
 							},
 							Perform: engine.Perform{Message: engine.Message{Text: &allGoOrJsonFiles, Links: []konveyor.Link{}}},
+							When:    engine.ConditionEntry{},
 						},
 					},
 				},
@@ -461,6 +471,7 @@ func TestLoadRules(t *testing.T) {
 								Description: "",
 							},
 							Perform: engine.Perform{Message: engine.Message{Text: &allGoOrJsonFiles, Links: []konveyor.Link{}}},
+							When:    engine.ConditionEntry{},
 						},
 					},
 				},
@@ -506,6 +517,7 @@ func TestLoadRules(t *testing.T) {
 								},
 								Tag: []string{"test"},
 							},
+							When: engine.ConditionEntry{},
 						},
 					},
 				},
@@ -557,6 +569,7 @@ func TestLoadRules(t *testing.T) {
 							Perform: engine.Perform{
 								Tag: []string{"test"},
 							},
+							When: engine.ConditionEntry{},
 						},
 					},
 				},
@@ -587,6 +600,7 @@ func TestLoadRules(t *testing.T) {
 								Category:    &konveyor.Potential,
 							},
 							Perform: engine.Perform{Message: engine.Message{Text: &allGoFiles, Links: []konveyor.Link{}}},
+							When:    engine.ConditionEntry{},
 						},
 					},
 				},
@@ -598,6 +612,7 @@ func TestLoadRules(t *testing.T) {
 								Category:    &konveyor.Potential,
 							},
 							Perform: engine.Perform{Message: engine.Message{Text: &allGoFiles, Links: []konveyor.Link{}}},
+							When:    engine.ConditionEntry{},
 						},
 					},
 				},
@@ -606,24 +621,6 @@ func TestLoadRules(t *testing.T) {
 				"builtin": testProvider{
 					caps: []provider.Capability{{
 						Name: "file",
-					}},
-				},
-			},
-		},
-		{
-			Name:         "failure-no-ruleset",
-			testFileName: "no-ruleset",
-			ShouldErr:    true,
-			ErrorMessage: "unable to find ruleset.yaml",
-			providerNameClient: map[string]provider.InternalProviderClient{
-				"builtin": testProvider{
-					caps: []provider.Capability{{
-						Name: "file",
-					}},
-				},
-				"notadded": testProvider{
-					caps: []provider.Capability{{
-						Name: "fake",
 					}},
 				},
 			},
@@ -668,6 +665,7 @@ func TestLoadRules(t *testing.T) {
 									},
 								},
 							},
+							When: engine.ConditionEntry{},
 						},
 					},
 				},
@@ -677,6 +675,137 @@ func TestLoadRules(t *testing.T) {
 					caps: []provider.Capability{{
 						Name: "file",
 					}},
+				},
+			},
+		},
+		{
+			Name:         "chaining should yield the same number of conditions as the rule",
+			testFileName: "rule-chain-2.yaml",
+			providerNameClient: map[string]provider.InternalProviderClient{
+				"builtin": testProvider{
+					caps: []provider.Capability{{
+						Name: "filecontent",
+					}},
+				},
+			},
+			ExpectedProvider: map[string]provider.InternalProviderClient{
+				"builtin": testProvider{
+					caps: []provider.Capability{{
+						Name: "filecontent",
+					}},
+				},
+			},
+			ExpectedRuleSet: map[string]engine.RuleSet{
+				"konveyor-analysis": {
+					Rules: []engine.Rule{
+						{
+							RuleMeta: engine.RuleMeta{
+								RuleID:      "chaining-rule",
+								Description: "",
+								Category:    &konveyor.Potential,
+							},
+							Perform: engine.Perform{
+								Message: engine.Message{
+									Text:  &allGoFiles,
+									Links: []konveyor.Link{},
+								},
+							},
+							When: engine.AndCondition{
+								Conditions: []engine.ConditionEntry{
+									{
+										From:      "",
+										As:        "file",
+										Ignorable: false,
+										Not:       false,
+									},
+									{
+										From:      "file",
+										As:        "",
+										Ignorable: false,
+										Not:       false,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			Name:         "no two conditions should have the same 'as' field within the same block",
+			testFileName: "rule-chain-same-as.yaml",
+			ShouldErr:    true,
+			ErrorMessage: "condition cannot have multiple 'as' fields with the same name",
+			providerNameClient: map[string]provider.InternalProviderClient{
+				"builtin": testProvider{
+					caps: []provider.Capability{{
+						Name: "filecontent",
+					}},
+				},
+			},
+			ExpectedProvider: map[string]provider.InternalProviderClient{
+				"builtin": testProvider{
+					caps: []provider.Capability{{
+						Name: "filecontent",
+					}},
+				},
+			},
+			ExpectedRuleSet: map[string]engine.RuleSet{
+				"konveyor-analysis": {
+					Rules: []engine.Rule{
+						{
+							RuleMeta: engine.RuleMeta{
+								RuleID:      "chaining-rule",
+								Description: "",
+								Category:    &konveyor.Potential,
+							},
+							Perform: engine.Perform{
+								Message: engine.Message{
+									Text:  &allGoFiles,
+									Links: []konveyor.Link{},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			Name:         "a condition should not have the same 'as' and 'from' fields",
+			testFileName: "rule-chain-same-as-from.yaml",
+			ShouldErr:    true,
+			ErrorMessage: "condition cannot have the same value for fields 'from' and 'as'",
+			providerNameClient: map[string]provider.InternalProviderClient{
+				"builtin": testProvider{
+					caps: []provider.Capability{{
+						Name: "filecontent",
+					}},
+				},
+			},
+			ExpectedProvider: map[string]provider.InternalProviderClient{
+				"builtin": testProvider{
+					caps: []provider.Capability{{
+						Name: "filecontent",
+					}},
+				},
+			},
+			ExpectedRuleSet: map[string]engine.RuleSet{
+				"konveyor-analysis": {
+					Rules: []engine.Rule{
+						{
+							RuleMeta: engine.RuleMeta{
+								RuleID:      "chaining-rule",
+								Description: "",
+								Category:    &konveyor.Potential,
+							},
+							Perform: engine.Perform{
+								Message: engine.Message{
+									Text:  &allGoFiles,
+									Links: []konveyor.Link{},
+								},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -698,7 +827,7 @@ func TestLoadRules(t *testing.T) {
 				t.Errorf("Got err: %v expected: should have error: %v or message: %v", err, tc.ShouldErr, tc.ErrorMessage)
 				return
 			}
-			if err == nil && tc.ShouldErr {
+			if tc.ShouldErr {
 				t.Errorf("expected error but not none")
 				return
 			}
@@ -740,6 +869,7 @@ func TestLoadRules(t *testing.T) {
 								foundRule = true
 							}
 						}
+						compareWhens(expectedRule.When, rule.When, t)
 					}
 					if !foundRule {
 						t.Errorf("not have matching rule go: %#v, expected rules: %#v", rule, expectedSet.Rules)
@@ -748,5 +878,47 @@ func TestLoadRules(t *testing.T) {
 				// We will test the conditions getter by itself.
 			}
 		})
+	}
+}
+
+func compareWhens(w1 engine.Conditional, w2 engine.Conditional, t *testing.T) {
+	if (w1 == nil && w2 != nil) || (w1 != nil && w2 == nil) {
+		t.Errorf("rulesets did not have matching when field")
+	}
+	if and1, ok := w1.(engine.AndCondition); ok {
+		and2, ok := w2.(engine.AndCondition)
+		if !ok {
+			t.Errorf("rulesets did not have matching when field")
+		}
+		compareConditions(and1.Conditions, and2.Conditions, t)
+	} else if or1, ok := w1.(engine.OrCondition); ok {
+		or2, ok := w2.(engine.OrCondition)
+		if !ok {
+			t.Errorf("rulesets did not have matching when field")
+		}
+		compareConditions(or1.Conditions, or2.Conditions, t)
+	}
+
+}
+
+func compareConditions(cs1 []engine.ConditionEntry, cs2 []engine.ConditionEntry, t *testing.T) {
+	if len(cs1) != len(cs2) {
+		t.Errorf("rulesets did not have the same number of conditions")
+	}
+	for i := 0; i < len(cs1); i++ {
+		c1 := cs1[i]
+		c2 := cs2[i]
+		if c1.As != c2.As {
+			t.Errorf("rulesets did not have the same As field")
+		}
+		if c1.From != c2.From {
+			t.Errorf("rulesets did not have the same From field")
+		}
+		if c1.Ignorable != c2.Ignorable {
+			t.Errorf("rulesets did not have the same Ignorable field")
+		}
+		if c1.Not != c2.Not {
+			t.Errorf("rulesets did not have the same Not field")
+		}
 	}
 }

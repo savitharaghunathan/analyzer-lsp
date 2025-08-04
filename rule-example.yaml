@@ -14,22 +14,25 @@
       pattern: "*.go"
 - message: not any go files
   ruleID: file-002
+  effort: 1
   when:
     builtin.file:
       pattern:  "*.go"
     not: true
 - message: POM XML dependencies - '{{{matchingXML}}}'
   ruleID: xml-pom-001
+  effort: 1
   when:
-    builtin.xml: 
+    builtin.xml:
       xpath: "//dependencies/dependency"
 - message: '{{{matchingXML}}}'
   ruleID: chain-pom-001
+  effort: 1
   when:
     or:
     - builtin.xml:
         xpath: "//dependencies/dependency"
-        filepaths: "{{poms.filepaths}}"
+        filepaths: "{{poms.extras.filepaths}}"
       from: poms
     - builtin.file:
         pattern: pom.xml
@@ -37,33 +40,37 @@
       ignore: true
 - message: apiextensions/v1beta1/customresourcedefinitions is deprecated, apiextensions/v1/customresourcedefinitions should be used instead
   ruleID: lang-ref-001
+  effort: 1
   when:
     or:
     - java.referenced:
         pattern: "*apiextensions.v1beta1.CustomResourceDefinition*"
         location: TYPE
-    - go.referenced: 
+    - go.referenced:
         pattern: "v1beta1.CustomResourceDefinition"
 - message: 'golang apiextensions/v1/customresourcedefinitions found {{file}}:{{lineNumber}}'
   ruleID: go-lang-ref-001
+  effort: 1
   when:
-    go.referenced: 
+    go.referenced:
         pattern: "v1beta1.CustomResourceDefinition"
 - message: testing nested conditions
   ruleID: lang-ref-002
+  effort: 1
   when:
     # This is purposfully failing, the golang reference will not
     # find anything. testing that `and` will work correctly
     and:
-    - go.referenced: 
+    - go.referenced:
           pattern: "*CustomResourceDefinition*"
     - java.referenced:
           pattern: "*CustomResourceDefinition*"
           location: TYPE
 - message: 'java found apiextensions/v1/customresourcedefinitions found {{file}}:{{lineNumber}}'
   ruleID: lang-ref-003
+  effort: 1
   when:
-    java.referenced: 
+    java.referenced:
       pattern: "*apiextensions.v1beta1.CustomResourceDefinition*"
       location: TYPE
 - tag:
@@ -82,7 +89,7 @@
     - Infra=Kubernetes
   ruleID: tag-k8s-000
   when:
-    builtin.filecontent: 
+    builtin.filecontent:
       pattern: ".*k8s.io/.*"
       filePattern: ".*go.mod"
 - tag:
@@ -92,7 +99,7 @@
     or:
       - builtin.file:
           pattern: "pom.xml"
-      - builtin.file: 
+      - builtin.file:
           pattern: "*.ear"
       - builtin.file:
           pattern: "*.jar"
@@ -109,6 +116,7 @@
       - Java
 - message: "dependency {{name}} with {{version}} is bad and you should feel bad for using it"
   ruleID: golang-gomod-dependencies
+  effort: 1
   when:
     and:
       - go.dependency:
@@ -123,6 +131,7 @@
           upperbound: v4.2.2
 - message: "dependency {{name}} with {{version}} is bad and you should feel bad for using it"
   ruleID: java-pomxml-dependencies
+  effort: 1
   when:
     and:
       - java.dependency:
@@ -134,6 +143,7 @@
           lowerbound: 5.0.100
 - message: "found generic call"
   ruleID: lang-ref-004
+  effort: 1
   customVariables:
    - pattern: '([A-z]+)\.get\(\)'
      name: VariableName
@@ -143,6 +153,7 @@
       pattern: com.example.apps.GenericClass.get
 - message: condition entries should evaluate out of order
   ruleID: singleton-sessionbean-00001
+  effort: 1
   when:
     or:
     - as: sessionbean
@@ -156,6 +167,7 @@
         pattern: javax.ejb.Singleton
 - message: condition entries should evaluate in order
   ruleID: singleton-sessionbean-00002
+  effort: 1
   when:
     or:
     - as: singleton
@@ -169,10 +181,17 @@
         pattern: javax.ejb.SessionBean
 - message: "error test"
   ruleID: error-rule-001
+  effort: 1
   when:
     builtin.xml:
       xpath:
         invalid-query: "test"
+- message: "JBoss 5.x EAR descriptor (jboss-app.xml) was found with public-id"
+  ruleID: jboss-eap5-7-xml-02000
+  effort: 1
+  when:
+    builtin.xmlPublicID:
+      regex: .*JBoss.+DTD Java EE.+5.*
 - message: "Tags {{tags}} found, creating message and new tag both"
   ruleID: multiple-actions-001
   tag:
@@ -182,7 +201,261 @@
     - Golang
 - message: "Found usage of openjdk base image"
   ruleID: filecontent-codesnip-test
+  effort: 1
   when:
     builtin.filecontent:
       pattern: "^FROM.*openjdk-11.*"
       filePattern: "Dockerfile"
+
+- message: python sample rule 001
+  ruleID: python-sample-rule-001
+  effort: 1
+  when:
+    python.referenced:
+      pattern: "hello_world"
+- message: python sample rule 002
+  ruleID: python-sample-rule-002
+  effort: 1
+  when:
+    python.referenced:
+      pattern: "speak"
+- message: python sample rule 003
+  ruleID: python-sample-rule-003
+  effort: 1
+  when:
+    python.referenced:
+      pattern: "create_custom_resource_definition"
+- message: Deprecated/removed Kubernetes API version 'extensions/v1beta1' is used for 'Deployment'. Consider using 'apps/v1'.
+  ruleID: k8s-deprecated-api-001
+  description: "Check for usage of deprecated Kubernetes API versions"
+  category: potential
+  effort: 2
+  when:
+    yaml.k8sResourceMatched:
+        apiVersion: "extensions/v1beta1"
+        kind: "Deployment"
+        deprecatedIn: "v1.9.0"
+        removedIn: "v1.16.0"
+        replacementAPI: "apps/v1"
+- message: Deprecated Kubernetes API version 'apps/v1beta1' is used for 'StatefulSet'. Consider using 'apps/v1'.
+  ruleID: k8s-deprecated-api-002
+  description: "Check for usage of deprecated Kubernetes API versions"
+  category: potential
+  effort: 2
+  when:
+    yaml.k8sResourceMatched:
+        apiVersion: "extensions/v1beta1"
+        kind: "ReplicaSet"
+        deprecatedIn: "v1.9.0"
+        removedIn: "v1.16.0"
+        replacementAPI: "apps/v1"
+- category: potential
+  description: "Test code snippets when match is a key of a XML node"
+  message: "The code snippet should point to <beans> in the beans.xml file"
+  ruleID: xml-test-key-match
+  effort: 1
+  when:
+    builtin.xml:
+      filepaths:
+      - beans.xml
+      namespaces:
+        b: http://xmlns.jcp.org/xml/ns/javaee
+      xpath: /b:beans
+- category: potential
+  description: Move to Jakarta EE Maven Artifacts - replace groupId javax.activation
+  effort: 1
+  message: If you migrate your application to JBoss EAP 7.3, or later, and want to
+    ensure its Maven building, running or testing works as expected, use instead the
+    Jakarta EE dependency with groupId `com.sun.activation`
+  ruleID: maven-javax-to-jakarta-00002
+  when:
+    java.dependency:
+      lowerbound: 0.0.0
+      name: javax.activation.activation
+- category: mandatory
+  description: |
+    This rule tests includedPaths config of the java provider. There should be two instances of this issue in the example app. 
+    We are filtering one of them using includedPaths in provider config.
+  effort: 3
+  message: Only incidents in util/FileReader.java should be found
+  ruleID: java-inclusion-test
+  when:
+    java.referenced:
+      pattern: java.io.File
+- category: optional
+  description: |
+    This is same as java-io-file-usage but for the builtin providers. There are multiple instances of the same incidents in different directories.
+    We are filtering some out using includedPaths setting.
+  message: Only incidents in dir-0/test.json should be found
+  ruleID: builtin-inclusion-test-json
+  effort: 1
+  when:
+    and:
+    - builtin.json:
+        xpath: //inclusionTestNode
+        filepaths: "{{incTest.filepaths}}"
+      from: incTest
+    - builtin.file:
+        pattern: inclusion-test.json
+      as: incTest
+      ignore: true
+- category: optional
+  description: |
+    This is same as java-io-file-usage but for the builtin providers. There are multiple instances of the same incidents in different directories.
+    We are filtering some out using includedPaths setting.
+  message: Only incidents in dir-0/test.xml should be found
+  ruleID: builtin-inclusion-test-xml
+  effort: 1
+  when:
+    and:
+    - builtin.xml:
+        xpath: //inclusionTestNode
+        filepaths: "{{incTest.filepaths}}"
+      from: incTest
+    - builtin.file:
+        pattern: inclusion-test.xml
+      as: incTest
+- category: mandatory
+  description: |
+    This rule looks for a class only present in the gradle project
+  effort: 3
+  message: Only incidents in gradle project should appear
+  ruleID: java-gradle-project
+  when:
+    java.referenced:
+      pattern: com.sun.net.httpserver.HttpExchange
+- category: mandatory
+  description: |
+    This rule tests the application downloaded from maven artifact
+  tag:
+  - Java Operator SDK
+  ruleID: java-downloaded-maven-artifact
+  when:
+    java.referenced:
+      pattern: io.javaoperatorsdk.operator.Operator
+- category: mandatory
+  description: Sample field declaration rule
+  message: "Field found"
+  ruleID: field-rule-00001
+  when:
+    java.referenced:
+      pattern: io.konveyor.demo.ordermanagement.repository.CustomerRepository
+      location: FIELD
+
+- category: mandatory
+  description: |
+    This rule looks for a given class annotated with a given annotation
+  message: "Annotation inspection 01"
+  ruleID: java-annotation-inspection-01
+  when:
+    java.referenced:
+      pattern: io.konveyor.demo.ordermanagement.config.PersistenceConfig
+      location: TYPE
+      annotated:
+        pattern: org.springframework.data.jpa.repository.config.EnableJpaRepositories
+        elements:
+          - name: basePackages
+            value: "io.konveyor.demo.ordermanagement.repository"
+- category: mandatory
+  description: |
+    This rule looks for a given method annotated with a given annotation
+  message: "Annotation inspection 02"
+  ruleID: java-annotation-inspection-02
+  when:
+    java.referenced:
+      pattern: entityManagerFactory()
+      location: METHOD_DECLARATION
+      annotated:
+        pattern: org.springframework.context.annotation.Bean
+- category: mandatory
+  description: |
+    This rule looks for a given field annotated with a given annotation
+  message: "Annotation inspection 03"
+  ruleID: java-annotation-inspection-03
+  when:
+    java.referenced:
+      pattern: io.konveyor.demo.ordermanagement.service.CustomerService
+      location: FIELD
+      annotated:
+        pattern: org.springframework.beans.factory.annotation.Autowired
+- category: mandatory
+  description: |
+    This rule looks for a given annotation used with some given properties (elements)
+  message: "Annotation inspection 04"
+  ruleID: java-annotation-inspection-04
+  when:
+    java.referenced:
+      pattern: org.springframework.web.bind.annotation.GetMapping
+      location: ANNOTATION
+      annotated:
+        elements:
+          - name: value
+            value: "id"
+- category: mandatory
+  description: |
+    This rule looks for a given annotation used with another annotation
+  message: "Annotation inspection 05"
+  ruleID: java-annotation-inspection-05
+  when:
+    java.referenced:
+      pattern: org.springframework.context.annotation.Configuration
+      location: ANNOTATION
+      annotated:
+        pattern: org.springframework.data.jpa.repository.config.EnableJpaRepositories
+        elements:
+          - name: basePackages
+            value: "io.konveyor.demo.ordermanagement.repository"
+- ruleID: java-chaining-01
+  category: mandatory
+  description: "There should only be one instance of this rule"
+  message: |
+    Sample message. This rule checks that the chaining conditions are working. Should only get a single issue.
+  when:
+    and:
+      - java.referenced:
+          pattern: java.lang.Override
+          location: ANNOTATION
+        as: class
+        ignore: true
+      - java.referenced:
+          pattern: org.springframework.web.WebApplicationInitializer
+          location: IMPLEMENTS_TYPE
+          filepaths: "{{class.Filepaths}}"
+        from: class
+
+- ruleID: annotation-on-any-class-01
+  category: mandatory
+  effort: 1
+  labels:
+    - konveyor.io/source=spring-boot2
+    - konveyor.io/target=spring-boot3+
+  when:
+    java.referenced:
+      pattern: '*'
+      location: CLASS
+      annotated:
+        pattern: javax.ejb.Singleton
+  description: "@Singleton found at class level"
+  message: |
+    A `@Singleton` annotation has been found annotating some class.
+- message: nodejs sample rule 001
+  ruleID: node-sample-rule-001
+  description: "Testing that the node provider works - type"
+  effort: 1
+  when:
+    nodejs.referenced:
+      pattern: "greeter"
+- message: nodejs sample rule 002
+  ruleID: node-sample-rule-002
+  description: "Testing that the node provider works - function"
+  effort: 1
+  when:
+    nodejs.referenced:
+      pattern: "hello"
+- message: nodejs sample rule 003
+  ruleID: node-sample-rule-003
+  description: "Testing that the node module files are not matched"
+  effort: 1
+  when:
+    nodejs.referenced:
+      pattern: "log"

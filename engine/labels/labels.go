@@ -7,10 +7,18 @@ import (
 	"strings"
 
 	"github.com/PaesslerAG/gval"
+	"github.com/hashicorp/go-version"
 )
 
 const (
-	LabelValueFmt      = "^[a-zA-Z0-9]([-a-zA-Z0-9. ]*[a-zA-Z0-9])?$"
+	// a selector label takes precedance over any other label when matching
+	RuleIncludeLabel = "konveyor.io/include"
+	SelectAlways     = "always"
+	SelectNever      = "never"
+)
+
+const (
+	LabelValueFmt      = "^[a-zA-Z0-9]([-a-zA-Z0-9. ]*[a-zA-Z0-9+-])?$"
 	LabelPrefixFmt     = "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
 	exprSpecialSymbols = `!|\|\||&&|\(|\)`
 	// used to split string into groups of special symbols and everything else
@@ -20,6 +28,7 @@ const (
 type LabelSelector[T Labeled] struct {
 	expr     string
 	language gval.Language
+	matchAny MatchAny
 }
 
 // Helper function to refactor key value label manipulation
@@ -32,7 +41,16 @@ func AsString(key, value string) string {
 
 func (l *LabelSelector[T]) Matches(v T) (bool, error) {
 	ruleLabels, _ := ParseLabels(v.GetLabels())
-	expr := getBooleanExpression(l.expr, ruleLabels)
+	if val, ok := ruleLabels[RuleIncludeLabel]; ok &&
+		val != nil && len(val) > 0 {
+		switch val[0] {
+		case SelectAlways:
+			return true, nil
+		case SelectNever:
+			return false, nil
+		}
+	}
+	expr := getBooleanExpression(l.expr, ruleLabels, l.matchAny)
 	val, err := l.language.Evaluate(expr, nil)
 	if err != nil {
 		return false, err
@@ -59,15 +77,21 @@ func (l *LabelSelector[T]) MatchList(list []T) ([]T, error) {
 	return newList, nil
 }
 
+func (l *LabelSelector[T]) Expression() string {
+	return l.expr
+}
+
 type Labeled interface {
 	GetLabels() []string
 }
+
+type MatchAny func(elem string, items []string) bool
 
 // NewRuleSelector returns a new rule selector that works on rule labels
 // it enables using string expressions to form complex label queries
 // supports "&&", "||" and "!" operators, "(" ")" for grouping, operands
 // are string labels in key=val format, keys can be subdomain prefixed
-func NewLabelSelector[T Labeled](expr string) (*LabelSelector[T], error) {
+func NewLabelSelector[T Labeled](expr string, match MatchAny) (*LabelSelector[T], error) {
 	language := gval.NewLanguage(
 		gval.Ident(),
 		gval.Parentheses(),
@@ -86,13 +110,17 @@ func NewLabelSelector[T Labeled](expr string) (*LabelSelector[T], error) {
 		gval.InfixBoolOperator("||", func(a, b bool) (interface{}, error) { return a || b, nil }),
 	)
 	// we need this hack to force validation
-	_, err := gval.Evaluate(getBooleanExpression(expr, map[string][]string{}), nil)
+	_, err := gval.Evaluate(getBooleanExpression(expr, map[string][]string{}, matchesAny), nil)
 	if err != nil {
 		return nil, fmt.Errorf("invalid expression '%s'", expr)
+	}
+	if match == nil {
+		match = matchesAny
 	}
 	return &LabelSelector[T]{
 		language: language,
 		expr:     expr,
+		matchAny: match,
 	}, nil
 }
 
@@ -190,7 +218,7 @@ func getLabelsFromExpression(expr string) (map[string][]string, error) {
 // does not understand labels as operands. "konveyor.io/k1=v1 && v2" will look
 // something like "true && false" as a boolean expression depending on passed labels
 // we wouldn't need this if gval supported writing custom operands
-func getBooleanExpression(expr string, compareLabels map[string][]string) string {
+func getBooleanExpression(expr string, compareLabels map[string][]string, matchAny MatchAny) string {
 	exprLabels, err := getLabelsFromExpression(expr)
 	if err != nil {
 		return expr
@@ -204,7 +232,7 @@ func getBooleanExpression(expr string, compareLabels map[string][]string) string
 			}
 			if labelVals, ok := compareLabels[exprLabelKey]; !ok {
 				replaceMap[toReplace] = "false"
-			} else if exprLabelVal != "" && !contains(exprLabelVal, labelVals) {
+			} else if exprLabelVal != "" && !matchAny(exprLabelVal, labelVals) {
 				replaceMap[toReplace] = "false"
 			} else {
 				replaceMap[toReplace] = "true"
@@ -235,11 +263,58 @@ func tokenize(expr string) []string {
 	return tokens
 }
 
-func contains(elem string, items []string) bool {
+func matchesAny(elem string, items []string) bool {
 	for _, item := range items {
-		if item == elem {
+		if item == "" || labelValueMatches(item, elem) {
 			return true
 		}
 	}
 	return false
+}
+
+// labelValueMatches returns true when candidate matches with matchWith
+// label value is divided into two parts - name and version
+// version is absolute version or a range denoted by + or -
+// returns true when names of values are equal and the version of
+// candidate falls within the version range of matchWith
+func labelValueMatches(matchWith string, candidate string) bool {
+	versionRegex := regexp.MustCompile(`(\d(?:[\d\.]*\d)?)([\+-])?$`)
+	mMatch := versionRegex.FindStringSubmatch(matchWith)
+	cMatch := versionRegex.FindStringSubmatch(candidate)
+	if len(mMatch) != 3 {
+		return candidate == matchWith
+	}
+	mName, mVersion, mVersionRangeSymbol :=
+		versionRegex.ReplaceAllString(matchWith, ""), mMatch[1], mMatch[2]
+	if len(cMatch) != 3 {
+		// when no version on candidate, match for any version
+		return mName == candidate
+	}
+	cName, cVersion :=
+		versionRegex.ReplaceAllString(candidate, ""), cMatch[1]
+	if mName != cName {
+		return false
+	}
+	if mVersion == "" {
+		return mVersion == cVersion
+	}
+	if cVersion == "" {
+		return true
+	}
+	cSemver, err := version.NewSemver(cVersion)
+	if err != nil {
+		return cVersion == mVersion
+	}
+	mSemver, err := version.NewSemver(mVersion)
+	if err != nil {
+		return cVersion == mVersion
+	}
+	switch mVersionRangeSymbol {
+	case "+":
+		return cSemver.GreaterThanOrEqual(mSemver)
+	case "-":
+		return mSemver.GreaterThanOrEqual(cSemver)
+	default:
+		return cSemver.Equal(mSemver)
+	}
 }

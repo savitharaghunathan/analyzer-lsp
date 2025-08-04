@@ -4,32 +4,42 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"go.lsp.dev/uri"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/cbroglie/mustache"
 	"github.com/go-logr/logr"
+	"github.com/konveyor/analyzer-lsp/engine/internal"
+	"github.com/konveyor/analyzer-lsp/engine/labels"
 	"github.com/konveyor/analyzer-lsp/output/v1/konveyor"
 	"github.com/konveyor/analyzer-lsp/tracing"
 )
 
 type RuleEngine interface {
 	RunRules(context context.Context, rules []RuleSet, selectors ...RuleSelector) []konveyor.RuleSet
+	RunRulesScoped(ctx context.Context, ruleSets []RuleSet, scopes Scope, selectors ...RuleSelector) []konveyor.RuleSet
 	Stop()
 }
 
 type ruleMessage struct {
-	rule        Rule
-	ruleSetName string
-	ctx         ConditionContext
-	returnChan  chan response
+	rule             Rule
+	ruleSetName      string
+	conditionContext ConditionContext
+	scope            Scope
+	returnChan       chan response
+	carrier          propagation.TextMapCarrier
 }
 
 type response struct {
@@ -47,9 +57,11 @@ type ruleEngine struct {
 
 	wg *sync.WaitGroup
 
-	incidentLimit int
-	codeSnipLimit int
-	contextLines  int
+	incidentLimit    int
+	codeSnipLimit    int
+	contextLines     int
+	incidentSelector string
+	locationPrefixes []string
 }
 
 type Option func(engine *ruleEngine)
@@ -69,6 +81,18 @@ func WithContextLines(i int) Option {
 func WithCodeSnipLimit(i int) Option {
 	return func(engine *ruleEngine) {
 		engine.codeSnipLimit = i
+	}
+}
+
+func WithIncidentSelector(selector string) Option {
+	return func(engine *ruleEngine) {
+		engine.incidentSelector = selector
+	}
+}
+
+func WithLocationPrefixes(location []string) Option {
+	return func(engine *ruleEngine) {
+		engine.locationPrefixes = location
 	}
 }
 
@@ -105,12 +129,21 @@ func (r *ruleEngine) Stop() {
 }
 
 func processRuleWorker(ctx context.Context, ruleMessages chan ruleMessage, logger logr.Logger, wg *sync.WaitGroup) {
+	prop := otel.GetTextMapPropagator()
 	for {
 		select {
 		case m := <-ruleMessages:
 			logger.V(5).Info("taking rule", "ruleset", m.ruleSetName, "rule", m.rule.RuleID)
-			m.ctx.Template = make(map[string]ChainTemplate)
-			bo, err := processRule(ctx, m.rule, m.ctx, logger)
+			newLogger := logger.WithValues("ruleID", m.rule.RuleID)
+			//We createa new rule context for a every rule run, here we need to apply the scope
+			m.conditionContext.Template = make(map[string]ChainTemplate)
+			if m.scope != nil {
+				m.scope.AddToContext(&m.conditionContext)
+			}
+			logger.Info("Adding Carrier span info to context")
+			ctx = prop.Extract(ctx, m.carrier)
+
+			bo, err := processRule(ctx, m.rule, m.conditionContext, newLogger)
 			logger.V(5).Info("finished rule", "found", len(bo.Incidents), "error", err, "rule", m.rule.RuleID)
 			m.returnChan <- response{
 				ConditionResponse: bo,
@@ -132,6 +165,7 @@ func (r *ruleEngine) createRuleSet(ruleSet RuleSet) *konveyor.RuleSet {
 		Description: ruleSet.Description,
 		Tags:        []string{},
 		Violations:  map[string]konveyor.Violation{},
+		Insights:    map[string]konveyor.Violation{},
 		Errors:      map[string]string{},
 		Unmatched:   []string{},
 		Skipped:     []string{},
@@ -142,18 +176,39 @@ func (r *ruleEngine) createRuleSet(ruleSet RuleSet) *konveyor.RuleSet {
 // This will run tagging rules first, synchronously, generating tags to pass on further as context to other rules
 // then runs remaining rules async, fanning them out, fanning them in, finally generating the results. will block until completed.
 func (r *ruleEngine) RunRules(ctx context.Context, ruleSets []RuleSet, selectors ...RuleSelector) []konveyor.RuleSet {
+	return r.RunRulesScoped(ctx, ruleSets, nil, selectors...)
+}
+
+func (r *ruleEngine) RunRulesScoped(ctx context.Context, ruleSets []RuleSet, scopes Scope, selectors ...RuleSelector) []konveyor.RuleSet {
 	// determine if we should run
 
+	conditionContext := ConditionContext{
+		Tags:     make(map[string]interface{}),
+		Template: make(map[string]ChainTemplate),
+	}
+	if scopes != nil {
+		r.logger.Info("using scopes", "scope", scopes.Name())
+		err := scopes.AddToContext(&conditionContext)
+		if err != nil {
+			r.logger.Error(err, "unable to apply scopes to ruleContext")
+			// Call this, even though it is not used, to make sure that
+			// we don't leak anything.
+			return []konveyor.RuleSet{}
+		}
+		r.logger.Info("added scopes to condition context", "scopes", scopes, "conditionContext", conditionContext)
+	}
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	r.logger.Info("inject span info", "carrier", carrier)
 	ctx, cancelFunc := context.WithCancel(ctx)
 
 	taggingRules, otherRules, mapRuleSets := r.filterRules(ruleSets, selectors...)
 
-	ruleContext := r.runTaggingRules(ctx, taggingRules, mapRuleSets)
+	ruleContext := r.runTaggingRules(ctx, taggingRules, mapRuleSets, conditionContext, scopes)
 
 	// Need a better name for this thing
 	ret := make(chan response)
 
-	var totalRules int32
 	var matchedRules int32
 	var unmatchedRules int32
 	var failedRules int32
@@ -165,7 +220,7 @@ func (r *ruleEngine) RunRules(ctx context.Context, ruleSets []RuleSet, selectors
 			select {
 			case response := <-ret:
 				func() {
-					r.logger.Info("rule returned", "rule", response.Rule.RuleID)
+					r.logger.Info("rule returned", "ruleID", response.Rule.RuleID)
 					defer wg.Done()
 					if response.Err != nil {
 						atomic.AddInt32(&failedRules, 1)
@@ -175,28 +230,40 @@ func (r *ruleEngine) RunRules(ctx context.Context, ruleSets []RuleSet, selectors
 							rs.Errors[response.Rule.RuleID] = response.Err.Error()
 						}
 					} else if response.ConditionResponse.Matched && len(response.ConditionResponse.Incidents) > 0 {
-						violation, err := r.createViolation(response.ConditionResponse, response.Rule)
+						violation, err := r.createViolation(ctx, response.ConditionResponse, response.Rule, scopes)
 						if err != nil {
-							r.logger.Error(err, "unable to create violation from response")
+							r.logger.Error(err, "unable to create violation from response", "ruleID", response.Rule.RuleID)
 						}
-						atomic.AddInt32(&matchedRules, 1)
-
-						rs, ok := mapRuleSets[response.RuleSetName]
-						if !ok {
-							r.logger.Info("this should never happen that we don't find the ruleset")
+						if len(violation.Incidents) == 0 {
+							r.logger.V(5).Info("rule was evaluated and incidents were filtered out to make it unmatched", "ruleID", response.Rule.RuleID)
+							atomic.AddInt32(&unmatchedRules, 1)
+							if rs, ok := mapRuleSets[response.RuleSetName]; ok {
+								rs.Unmatched = append(rs.Unmatched, response.Rule.RuleID)
+							}
+						} else {
+							atomic.AddInt32(&matchedRules, 1)
+							rs, ok := mapRuleSets[response.RuleSetName]
+							if !ok {
+								r.logger.Info("this should never happen that we don't find the ruleset")
+								return
+							}
+							// when a rule has 0 effort, we should create an insight instead
+							if response.Rule.Effort == nil || *response.Rule.Effort == 0 {
+								rs.Insights[response.Rule.RuleID] = violation
+							} else {
+								rs.Violations[response.Rule.RuleID] = violation
+							}
 						}
-						rs.Violations[response.Rule.RuleID] = violation
 					} else {
 						atomic.AddInt32(&unmatchedRules, 1)
 						// Log that rule did not pass
-						r.logger.V(5).Info("rule was evaluated, and we did not find a violation", "rule", response.Rule.RuleID)
+						r.logger.V(5).Info("rule was evaluated, and we did not find a violation", "ruleID", response.Rule.RuleID)
 
 						if rs, ok := mapRuleSets[response.RuleSetName]; ok {
 							rs.Unmatched = append(rs.Unmatched, response.Rule.RuleID)
 						}
 					}
-					atomic.AddInt32(&totalRules, 1)
-					r.logger.V(5).Info("rule response received", "total", totalRules, "failed", failedRules, "matched", matchedRules, "unmatched", unmatchedRules)
+					r.logger.V(5).Info("rule response received", "total", len(otherRules), "failed", failedRules, "matched", matchedRules, "unmatched", unmatchedRules)
 
 				}()
 			case <-ctx.Done():
@@ -207,9 +274,13 @@ func (r *ruleEngine) RunRules(ctx context.Context, ruleSets []RuleSet, selectors
 	}()
 
 	for _, rule := range otherRules {
+		newContext := ruleContext.Copy()
+		newContext.RuleID = rule.rule.RuleID
 		wg.Add(1)
 		rule.returnChan = ret
-		rule.ctx = ruleContext
+		rule.conditionContext = newContext
+		rule.scope = scopes
+		rule.carrier = carrier
 		r.ruleProcessing <- rule
 	}
 	r.logger.V(5).Info("All rules added buffer, waiting for engine to complete", "size", len(otherRules))
@@ -253,7 +324,7 @@ func (r *ruleEngine) filterRules(ruleSets []RuleSet, selectors ...RuleSelector) 
 			// skip rule when doesn't match any selector
 			if !matchesAllSelectors(rule.RuleMeta, selectors...) {
 				mapRuleSets[ruleSet.Name].Skipped = append(mapRuleSets[ruleSet.Name].Skipped, rule.RuleID)
-				r.logger.Info("one or more selectors did not match for rule, skipping", "rule", rule.RuleMeta)
+				r.logger.V(5).Info("one or more selectors did not match for rule, skipping", "ruleID", rule.RuleID)
 				continue
 			}
 
@@ -267,9 +338,9 @@ func (r *ruleEngine) filterRules(ruleSets []RuleSet, selectors ...RuleSelector) 
 					rule:        rule,
 					ruleSetName: ruleSet.Name,
 				})
-				// if both message and tag are set
-				// split message part into a new rule
-				if rule.Perform.Message.Text != nil {
+				// if both message and tag are set, split message part into a new rule if effort is non-zero
+				// if effort is zero, we do not want to create a violation but only tag and an insight
+				if rule.Perform.Message.Text != nil && rule.Effort != nil && *rule.Effort != 0 {
 					rule.Perform.Tag = nil
 					otherRules = append(
 						otherRules,
@@ -287,23 +358,34 @@ func (r *ruleEngine) filterRules(ruleSets []RuleSet, selectors ...RuleSelector) 
 
 // runTaggingRules filters and runs info rules synchronously
 // returns list of non-info rules, a context to pass to them
-func (r *ruleEngine) runTaggingRules(ctx context.Context, infoRules []ruleMessage, mapRuleSets map[string]*konveyor.RuleSet) ConditionContext {
-	context := ConditionContext{
-		Tags:     make(map[string]interface{}),
-		Template: make(map[string]ChainTemplate),
-	}
+func (r *ruleEngine) runTaggingRules(ctx context.Context, infoRules []ruleMessage, mapRuleSets map[string]*konveyor.RuleSet, context ConditionContext, scope Scope) ConditionContext {
+	//  move all rules that have HasTags to the end of the list as they depend on other tagging rules
+	sort.Slice(infoRules, func(i int, j int) bool {
+		return !infoRules[i].rule.UsesHasTags && infoRules[j].rule.UsesHasTags
+	})
 	// track unique tags per ruleset
 	rulesetTagsCache := map[string]map[string]bool{}
 	for _, ruleMessage := range infoRules {
 		rule := ruleMessage.rule
-		response, err := processRule(ctx, rule, context, r.logger)
+		ruleCtx := context.Copy()
+		ruleCtx.RuleID = rule.RuleID
+		response, err := processRule(ctx, rule, ruleCtx, r.logger)
 		if err != nil {
 			r.logger.Error(err, "failed to evaluate rule", "ruleID", rule.RuleID)
 			if rs, ok := mapRuleSets[ruleMessage.ruleSetName]; ok {
 				rs.Errors[rule.RuleID] = err.Error()
 			}
-		} else if response.Matched {
+		} else if response.Matched && len(response.Incidents) > 0 {
 			r.logger.V(5).Info("info rule was matched", "ruleID", rule.RuleID)
+			// create an insight for this tag
+			violation, err := r.createViolation(ctx, response, rule, scope)
+			if err != nil {
+				r.logger.Error(err, "unable to create violation from response", "ruleID", rule.RuleID)
+			}
+			if len(violation.Incidents) == 0 {
+				r.logger.V(5).Info("rule was evaluated and incidents were filtered out to make it unmatched", "ruleID", rule.RuleID)
+				continue
+			}
 			tags := map[string]bool{}
 			for _, tagString := range rule.Perform.Tag {
 				if strings.Contains(tagString, "{{") && strings.Contains(tagString, "}}") {
@@ -318,7 +400,7 @@ func (r *ruleEngine) runTaggingRules(ctx context.Context, infoRules []ruleMessag
 						}
 						templateString, err := r.createPerformString(tagString, variables)
 						if err != nil {
-							r.logger.Error(err, "unable to create tag string")
+							r.logger.Error(err, "unable to create tag string", "ruleID", rule.RuleID)
 							continue
 						}
 						tags[templateString] = true
@@ -352,6 +434,15 @@ func (r *ruleEngine) runTaggingRules(ctx context.Context, infoRules []ruleMessag
 				}
 				mapRuleSets[ruleMessage.ruleSetName] = rs
 			}
+			if rs, ok := mapRuleSets[ruleMessage.ruleSetName]; ok {
+				violation.Effort = nil
+				violation.Category = nil
+				// we need to tie these incidents back to tags that created them
+				for tag := range tags {
+					violation.Labels = append(violation.Labels, fmt.Sprintf("tag=%s", tag))
+				}
+				rs.Insights[rule.RuleID] = violation
+			}
 		} else {
 			r.logger.Info("info rule not matched", "rule", rule.RuleID)
 			if rs, ok := mapRuleSets[ruleMessage.ruleSetName]; ok {
@@ -379,6 +470,7 @@ func parseTagsFromPerformString(tagString string) ([]string, error) {
 }
 
 func processRule(ctx context.Context, rule Rule, ruleCtx ConditionContext, log logr.Logger) (ConditionResponse, error) {
+	log.WithName("process-rule").Info("processing rule", "ruleID", rule.RuleID)
 	ctx, span := tracing.StartNewSpan(
 		ctx, "process-rule", attribute.Key("rule").String(rule.RuleID))
 	defer span.End()
@@ -388,19 +480,74 @@ func processRule(ctx context.Context, rule Rule, ruleCtx ConditionContext, log l
 
 }
 
-func (r *ruleEngine) createViolation(conditionResponse ConditionResponse, rule Rule) (konveyor.Violation, error) {
+func (r *ruleEngine) getRelativePathForViolation(fileURI uri.URI) (uri.URI, error) {
+	var sourceLocation string
+	if fileURI != "" {
+		u, err := url.ParseRequestURI(string(fileURI))
+		if err != nil || u.Scheme != uri.FileScheme {
+			return fileURI, nil
+		}
+		file := fileURI.Filename()
+		// get the correct source
+		for _, locationPrefix := range r.locationPrefixes {
+			if strings.Contains(file, locationPrefix) {
+				sourceLocation = locationPrefix
+				break
+			}
+		}
+		absPath, err := filepath.Abs(sourceLocation)
+		if err != nil {
+			return fileURI, nil
+		}
+		// given a relative path for source
+		if absPath != sourceLocation {
+			relPath := filepath.Join(sourceLocation, strings.TrimPrefix(file, absPath))
+			newURI := fmt.Sprintf("file:///%s", filepath.Join(strings.TrimPrefix(relPath, "/")))
+			return uri.URI(newURI), nil
+		}
+	}
+	return fileURI, nil
+}
+
+func (r *ruleEngine) createViolation(ctx context.Context, conditionResponse ConditionResponse, rule Rule, scope Scope) (konveyor.Violation, error) {
 	incidents := []konveyor.Incident{}
 	fileCodeSnipCount := map[string]int{}
 	incidentsSet := map[string]struct{}{} // Set of incidents
+	var incidentSelector *labels.LabelSelector[internal.VariableLabelSelector]
+	var err error
+	if r.incidentSelector != "" {
+		incidentSelector, err = labels.NewLabelSelector[internal.VariableLabelSelector](r.incidentSelector, internal.MatchVariables)
+		if err != nil {
+			return konveyor.Violation{}, err
+		}
+	}
 	for _, m := range conditionResponse.Incidents {
 		// Exit loop, we don't care about any incidents past the filter.
 		if r.incidentLimit != 0 && len(incidents) == r.incidentLimit {
 			break
 		}
+		// If we should remove the incident because the provider didn't filter it
+		// and the user asked for a certain scope of incidents.
+		if scope != nil && scope.FilterResponse(m) {
+			continue
+		}
+		trimmedUri, err := r.getRelativePathForViolation(m.FileURI)
+		if err != nil {
+			return konveyor.Violation{}, err
+		}
+
+		for val := range m.Variables {
+			if val == "file" {
+				m.Variables["file"] = trimmedUri
+			}
+		}
+
 		incident := konveyor.Incident{
-			URI:        m.FileURI,
+			URI:        trimmedUri,
 			LineNumber: m.LineNumber,
-			Variables:  m.Variables,
+			// This allows us to change m.Variables and it will be set
+			// because it is a pointer.
+			Variables: m.Variables,
 		}
 		if m.LineNumber != nil {
 			lineNumber := *m.LineNumber
@@ -409,7 +556,7 @@ func (r *ruleEngine) createViolation(conditionResponse ConditionResponse, rule R
 		// Some violations may not have a location in code.
 		limitSnip := (r.codeSnipLimit != 0 && fileCodeSnipCount[string(m.FileURI)] == r.codeSnipLimit)
 		if !limitSnip {
-			codeSnip, err := r.getCodeLocation(m, rule)
+			codeSnip, err := r.getCodeLocation(ctx, m, rule)
 			if err != nil || codeSnip == "" {
 				r.logger.V(6).Error(err, "unable to get code location")
 			} else {
@@ -423,32 +570,31 @@ func (r *ruleEngine) createViolation(conditionResponse ConditionResponse, rule R
 			re := regexp.MustCompile(`^(\s*[0-9]+  )?(.*)`)
 			scanner := bufio.NewScanner(strings.NewReader(incident.CodeSnip))
 			for scanner.Scan() {
-				originalCodeSnip = originalCodeSnip + re.ReplaceAllString(scanner.Text(), "$2")
+				if incident.LineNumber != nil && strings.HasPrefix(strings.TrimSpace(scanner.Text()), fmt.Sprintf("%v", *incident.LineNumber)) {
+					originalCodeSnip = strings.TrimSpace(re.ReplaceAllString(scanner.Text(), "$2"))
+					r.logger.V(5).Info("found originalCodeSnip", "lineNuber", incident.LineNumber, "original", originalCodeSnip)
+					break
+				}
 			}
 
 			for _, cv := range rule.CustomVariables {
 				match := cv.Pattern.FindStringSubmatch(originalCodeSnip)
-				switch len(match) {
-				case 0:
-					m.Variables[cv.Name] = cv.DefaultValue
+				if cv.NameOfCaptureGroup != "" && cv.Pattern.SubexpIndex(cv.NameOfCaptureGroup) >= 0 &&
+					cv.Pattern.SubexpIndex(cv.NameOfCaptureGroup) < len(match) {
+
+					m.Variables[cv.Name] = strings.TrimSpace(match[cv.Pattern.SubexpIndex(cv.NameOfCaptureGroup)])
 					continue
-				case 1:
-					m.Variables[cv.Name] = match[0]
-					continue
-				case 2:
-					m.Variables[cv.Name] = match[1]
-				default:
-					// if more than 1 match, then we have to look up the names.
-					found := false
-					for i, n := range cv.Pattern.SubexpNames() {
-						if n == cv.NameOfCaptureGroup {
-							m.Variables[cv.Name] = match[i]
-							found = true
-							break
-						}
-					}
-					if !found {
+
+				} else {
+					switch len(match) {
+					case 0:
 						m.Variables[cv.Name] = cv.DefaultValue
+						continue
+					case 1:
+						m.Variables[cv.Name] = strings.TrimSpace(match[0])
+						continue
+					case 2:
+						m.Variables[cv.Name] = strings.TrimSpace(match[1])
 					}
 				}
 			}
@@ -474,6 +620,19 @@ func (r *ruleEngine) createViolation(conditionResponse ConditionResponse, rule R
 			incidentLineNumber = *incident.LineNumber
 		}
 
+		// Deterime if we can filter out based on incident selector.
+		if r.incidentSelector != "" {
+			v := internal.VariableLabelSelector(incident.Variables)
+			b, err := incidentSelector.Matches(v)
+			if err != nil {
+				r.logger.Error(err, "unable to determine if incident should filter out, defautl to adding")
+			}
+			if !b {
+				r.logger.V(8).Info("filtering out incident based on incident selector")
+				continue
+			}
+		}
+
 		incidentString := fmt.Sprintf("%s-%s-%d", incident.URI, incident.Message, incidentLineNumber) // Formating a unique string for an incident
 
 		// Adding it to list  and set if no duplicates found
@@ -481,6 +640,7 @@ func (r *ruleEngine) createViolation(conditionResponse ConditionResponse, rule R
 			incidents = append(incidents, incident)
 			incidentsSet[incidentString] = struct{}{}
 		}
+
 	}
 
 	rule.Labels = deduplicateLabels(rule.Labels)
@@ -496,10 +656,16 @@ func (r *ruleEngine) createViolation(conditionResponse ConditionResponse, rule R
 	}, nil
 }
 
-func (r *ruleEngine) getCodeLocation(m IncidentContext, rule Rule) (codeSnip string, err error) {
+func (r *ruleEngine) getCodeLocation(_ context.Context, m IncidentContext, rule Rule) (codeSnip string, err error) {
 	if m.CodeLocation == nil {
 		r.logger.V(6).Info("unable to get the code snip", "URI", m.FileURI)
 		return "", nil
+	}
+
+	// We need to move this up, because the code only lives in the
+	// provider's
+	if rule.Snipper != nil {
+		return rule.Snipper.GetCodeSnip(m.FileURI, *m.CodeLocation)
 	}
 
 	if strings.HasPrefix(string(m.FileURI), uri.FileScheme) {
@@ -526,9 +692,6 @@ func (r *ruleEngine) getCodeLocation(m IncidentContext, rule Rule) (codeSnip str
 			lineNumber += 1
 		}
 		return codeSnip, nil
-	}
-	if rule.Snipper != nil {
-		return rule.Snipper.GetCodeSnip(m.FileURI, *m.CodeLocation)
 	}
 
 	// if it is not a file ask the provider

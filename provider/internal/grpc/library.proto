@@ -20,12 +20,16 @@ message Config {
   string analysisMode = 4;
   google.protobuf.Struct providerSpecificConfig= 5;
   Proxy proxy = 6;
+
+  // repeated string workspaceFolders = 7;
+  // repeated string dependencyFolders = 8;
 }
 
 message InitResponse {
   string error = 1 ;
   bool successful = 2;
   int64 id = 3;
+  Config builtinConfig = 4;
 }
 
 message ExternalLink {
@@ -50,6 +54,7 @@ message IncidentContext {
   optional int64 LineNumber = 4;
   google.protobuf.Struct variables = 5;
   repeated ExternalLink links = 6;
+  bool IsDependencyIncident = 7;
 }
 
 message ProviderEvaluateResponse {
@@ -88,32 +93,47 @@ message GetCodeSnipRequest{
   Location codeLocation = 2;
 }
 
+message GetDependencyLocationRequest{
+  Dependency dep = 1;
+  string DepFile = 2;
+}
+
 message GetCodeSnipResponse{
-  string codeSnip  = 1;
-  string uri = 2;
-  string error = 3;
-  bool successful = 4;
+  string snip= 1;
+}
+
+message GetDependencyLocationResponse{
+  Location location= 1;
+}
+
+service ProviderCodeLocationService {
+  rpc GetCodeSnip(GetCodeSnipRequest) returns (GetCodeSnipResponse) {};
+}
+
+service ProviderDependencyLocationService {
+  rpc GetDependencyLocation(GetDependencyLocationRequest) returns (GetDependencyLocationResponse) {};
 }
 
 service ProviderService {
   rpc Capabilities (google.protobuf.Empty) returns (CapabilitiesResponse) {};
   rpc Init (Config) returns (InitResponse) {};
   rpc Evaluate (EvaluateRequest) returns (EvaluateResponse) {};
-  rpc GetCodeSnip(GetCodeSnipRequest) returns (GetCodeSnipResponse) {};
   rpc Stop (ServiceRequest) returns (google.protobuf.Empty) {};
   rpc GetDependencies (ServiceRequest) returns (DependencyResponse) {};
   rpc GetDependenciesDAG(ServiceRequest) returns (DependencyDAGResponse) {};
+  rpc NotifyFileChanges(NotifyFileChangesRequest) returns (NotifyFileChangesResponse) {};
 }
 
 message Dependency {
   string name = 1;
   string version = 2;
-  string type = 3;
-  string resolvedIdentifier = 4;
-  string fileURIPrefix = 5;
-  bool indirect = 6;
-  google.protobuf.Struct extras = 7;
-  repeated string labels = 8;
+  string classifier = 3;
+  string type = 4;
+  string resolvedIdentifier = 5;
+  string fileURIPrefix = 6;
+  bool indirect = 7;
+  google.protobuf.Struct extras = 8;
+  repeated string labels = 9;
 }
 
 message DependencyList {
@@ -151,4 +171,18 @@ message Proxy {
   string HTTPProxy = 1;
   string HTTPSProxy = 2;
   string NoProxy = 3;
+}
+
+message FileChange {
+  string Uri = 1;
+  string Content = 2;
+  bool Saved = 3;
+}
+
+message NotifyFileChangesRequest {
+  repeated FileChange changes = 1;
+}
+
+message NotifyFileChangesResponse {
+  string error = 1;
 }

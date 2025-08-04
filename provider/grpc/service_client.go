@@ -11,20 +11,20 @@ import (
 
 type grpcServiceClient struct {
 	id     int64
-	ctx    context.Context
 	config provider.InitConfig
 	client pb.ProviderServiceClient
 }
 
 var _ provider.ServiceClient = &grpcServiceClient{}
 
-func (g *grpcServiceClient) Evaluate(cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
+func (g *grpcServiceClient) Evaluate(ctx context.Context, cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
 	m := pb.EvaluateRequest{
 		Cap:           cap,
 		ConditionInfo: string(conditionInfo),
 		Id:            g.id,
 	}
-	r, err := g.client.Evaluate(g.ctx, &m)
+
+	r, err := g.client.Evaluate(ctx, &m)
 	if err != nil {
 		return provider.ProviderEvaluateResponse{}, err
 	}
@@ -43,8 +43,9 @@ func (g *grpcServiceClient) Evaluate(cap string, conditionInfo []byte) (provider
 	incs := []provider.IncidentContext{}
 	for _, i := range r.Response.IncidentContexts {
 		inc := provider.IncidentContext{
-			FileURI:   uri.URI(i.FileURI),
-			Variables: i.GetVariables().AsMap(),
+			FileURI:              uri.URI(i.FileURI),
+			Variables:            i.GetVariables().AsMap(),
+			IsDependencyIncident: i.IsDependencyIncident,
 		}
 		if i.LineNumber != nil {
 			lineNumber := int(*i.LineNumber)
@@ -85,8 +86,8 @@ func (g *grpcServiceClient) Evaluate(cap string, conditionInfo []byte) (provider
 }
 
 // We don't have dependencies
-func (g *grpcServiceClient) GetDependencies() (map[uri.URI][]*provider.Dep, error) {
-	d, err := g.client.GetDependencies(g.ctx, &pb.ServiceRequest{Id: g.id})
+func (g *grpcServiceClient) GetDependencies(ctx context.Context) (map[uri.URI][]*provider.Dep, error) {
+	d, err := g.client.GetDependencies(ctx, &pb.ServiceRequest{Id: g.id})
 	if err != nil {
 		return nil, err
 	}
@@ -105,11 +106,13 @@ func (g *grpcServiceClient) GetDependencies() (map[uri.URI][]*provider.Dep, erro
 			deps = append(deps, &provider.Dep{
 				Name:               d.Name,
 				Version:            d.Version,
+				Classifier:         d.Classifier,
 				Type:               d.Type,
 				Indirect:           d.Indirect,
 				ResolvedIdentifier: d.ResolvedIdentifier,
 				Extras:             d.Extras.AsMap(),
 				Labels:             d.Labels,
+				FileURIPrefix:      d.FileURIPrefix,
 			})
 		}
 		provs[u] = deps
@@ -127,11 +130,13 @@ func recreateDAGAddedItems(items []*pb.DependencyDAGItem) []provider.DepDAGItem 
 			Dep: provider.Dep{
 				Name:               x.Key.Name,
 				Version:            x.Key.Version,
+				Classifier:         x.Key.Classifier,
 				Type:               x.Key.Type,
 				Indirect:           x.Key.Indirect,
 				ResolvedIdentifier: x.Key.ResolvedIdentifier,
 				Extras:             x.Key.Extras.AsMap(),
 				Labels:             x.Key.Labels,
+				FileURIPrefix:      x.Key.FileURIPrefix,
 			},
 			AddedDeps: recreateDAGAddedItems(x.AddedDeps),
 		})
@@ -140,8 +145,8 @@ func recreateDAGAddedItems(items []*pb.DependencyDAGItem) []provider.DepDAGItem 
 }
 
 // We don't have dependencies
-func (g *grpcServiceClient) GetDependenciesDAG() (map[uri.URI][]provider.DepDAGItem, error) {
-	d, err := g.client.GetDependenciesDAG(g.ctx, &pb.ServiceRequest{Id: g.id})
+func (g *grpcServiceClient) GetDependenciesDAG(ctx context.Context) (map[uri.URI][]provider.DepDAGItem, error) {
+	d, err := g.client.GetDependenciesDAG(ctx, &pb.ServiceRequest{Id: g.id})
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +165,26 @@ func (g *grpcServiceClient) GetDependenciesDAG() (map[uri.URI][]provider.DepDAGI
 
 	return m, nil
 
+}
+
+func (g *grpcServiceClient) NotifyFileChanges(ctx context.Context, changes ...provider.FileChange) error {
+	fileChanges := []*pb.FileChange{}
+
+	for _, change := range changes {
+		fileChanges = append(fileChanges, &pb.FileChange{
+			Uri:     change.Path,
+			Content: change.Content,
+		})
+	}
+
+	fileChangeResponse, err := g.client.NotifyFileChanges(ctx, &pb.NotifyFileChangesRequest{Changes: fileChanges})
+	if err != nil {
+		return err
+	}
+	if fileChangeResponse.Error != "" {
+		return fmt.Errorf(fileChangeResponse.Error)
+	}
+	return nil
 }
 
 func (g *grpcServiceClient) Stop() {
