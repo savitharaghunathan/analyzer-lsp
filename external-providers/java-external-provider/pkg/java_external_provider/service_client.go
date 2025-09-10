@@ -1,19 +1,24 @@
 package java
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/hashicorp/go-version"
 	"github.com/konveyor/analyzer-lsp/engine/labels"
 	"github.com/konveyor/analyzer-lsp/jsonrpc2"
 	"github.com/konveyor/analyzer-lsp/lsp/protocol"
@@ -45,6 +50,7 @@ type javaServiceClient struct {
 	includedPaths      []string
 	cleanExplodedBins  []string
 	disableMavenSearch bool
+	activeRPCCalls     sync.WaitGroup
 }
 
 type depLabelItem struct {
@@ -177,6 +183,9 @@ func (p *javaServiceClient) GetAllSymbols(ctx context.Context, c javaCondition, 
 	if strings.HasSuffix(c.Referenced.Pattern, "*") || strings.HasSuffix(c.Referenced.Pattern, "*)") {
 		timeout = 10 * time.Minute
 	}
+	p.activeRPCCalls.Add(1)
+	defer p.activeRPCCalls.Done()
+
 	timeOutCtx, _ := context.WithTimeout(ctx, timeout)
 	err = p.rpc.Call(timeOutCtx, "workspace/executeCommand", wsp, &refs)
 	if err != nil {
@@ -237,6 +246,9 @@ func (p *javaServiceClient) GetAllReferences(ctx context.Context, symbol protoco
 		},
 	}
 
+	p.activeRPCCalls.Add(1)
+	defer p.activeRPCCalls.Done()
+
 	res := []protocol.Location{}
 	err := p.rpc.Call(ctx, "textDocument/references", params, &res)
 	if err != nil {
@@ -255,16 +267,53 @@ func (p *javaServiceClient) NotifyFileChanges(ctx context.Context, changes ...pr
 }
 
 func (p *javaServiceClient) Stop() {
+	err := p.shutdown()
+	if err != nil {
+		p.log.Error(err, "failed to gracefully shutdown java provider")
+	}
 	p.cancelFunc()
-	err := p.cmd.Wait()
+	err = p.cmd.Wait()
 	if err != nil {
 		p.log.Info("stopping java provider", "error", err)
 	}
+
 	if len(p.cleanExplodedBins) > 0 {
 		for _, explodedPath := range p.cleanExplodedBins {
 			os.RemoveAll(explodedPath)
 		}
 	}
+}
+
+func (p *javaServiceClient) shutdown() error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	p.log.Info("waiting for active RPC calls to complete")
+	done := make(chan struct{})
+	go func() {
+		p.activeRPCCalls.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		p.log.V(7).Info("all active RPC calls completed")
+	case <-time.After(10 * time.Second):
+		p.log.Info("timeout waiting for active RPC calls to complete, proceeding with shutdown")
+	}
+
+	var shutdownResult interface{}
+	err := p.rpc.Call(shutdownCtx, "shutdown", nil, &shutdownResult)
+	if err != nil {
+		p.log.Error(err, "failed to send shutdown request to language server")
+		return err
+	}
+	err = p.rpc.Notify(shutdownCtx, "exit", nil)
+	if err != nil {
+		p.log.Error(err, "failed to send exit notification to language server")
+		return err
+	}
+	return nil
 }
 
 func (p *javaServiceClient) initialization(ctx context.Context) {
@@ -404,4 +453,74 @@ func createProjectAndClasspathFiles(basePath string, projectName string) error {
 		}
 	}
 	return nil
+}
+
+func (s *javaServiceClient) GetGradleWrapper() (string, error) {
+	wrapper := "gradlew"
+	if runtime.GOOS == "windows" {
+		wrapper = "gradlew.bat"
+	}
+	exe, err := filepath.Abs(filepath.Join(s.config.Location, wrapper))
+	if err != nil {
+		return "", fmt.Errorf("error calculating gradle wrapper path")
+	}
+	if _, err = os.Stat(exe); errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("a gradle wrapper is not present in the project")
+	}
+	return exe, err
+}
+
+func (s *javaServiceClient) GetGradleVersion(ctx context.Context) (version.Version, error) {
+	exe, err := s.GetGradleWrapper()
+	if err != nil {
+		return version.Version{}, err
+	}
+
+	// getting the Gradle version is the first step for guessing compatibility
+	// up to 8.14 is compatible with Java 8, so let's first try to run with that
+	args := []string{
+		"--version",
+	}
+	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd.Dir = s.config.Location
+	cmd.Env = append(cmd.Env, fmt.Sprintf("JAVA_HOME=%s", os.Getenv("JAVA8_HOME")))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// if executing with 8 we get an error, try with 17
+		cmd.Env = append(cmd.Env, fmt.Sprintf("JAVA_HOME=%s", os.Getenv("JAVA_HOME")))
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			return version.Version{}, fmt.Errorf("error trying to get Gradle version: %w - Gradle output: %s", err, string(output))
+		}
+	}
+
+	vRegex := regexp.MustCompile(`Gradle (\d+(\.\d+)*)`)
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if match := vRegex.FindStringSubmatch(line); len(match) != 0 {
+			v, err := version.NewVersion(match[1])
+			if err != nil {
+				return version.Version{}, err
+			}
+			return *v, err
+		}
+	}
+	return version.Version{}, nil
+}
+
+func (s *javaServiceClient) GetJavaHomeForGradle(ctx context.Context) (string, error) {
+	v, err := s.GetGradleVersion(ctx)
+	if err != nil {
+		return "", err
+	}
+	lastVersionForJava8, _ := version.NewVersion("8.14")
+	if v.LessThanOrEqual(lastVersionForJava8) {
+		java8home := os.Getenv("JAVA8_HOME")
+		if java8home == "" {
+			return "", fmt.Errorf("couldn't get JAVA8_HOME environment variable")
+		}
+		return java8home, nil
+	}
+	return os.Getenv("JAVA_HOME"), nil
 }

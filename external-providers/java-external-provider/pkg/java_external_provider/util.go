@@ -24,6 +24,8 @@ import (
 	"math/rand"
 
 	"github.com/go-logr/logr"
+	"github.com/konveyor/analyzer-lsp/engine/labels"
+	"github.com/konveyor/analyzer-lsp/provider"
 	"github.com/konveyor/analyzer-lsp/tracing"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -68,6 +70,10 @@ type javaArtifact struct {
 	ArtifactId  string
 	Version     string
 	sha1        string
+}
+
+func (j javaArtifact) isValid() bool {
+	return (j.ArtifactId != "" && j.GroupId != "" && j.Version != "")
 }
 
 type decompileFilter interface {
@@ -369,55 +375,13 @@ func explode(ctx context.Context, log logr.Logger, archivePath, projectPath stri
 		case strings.HasSuffix(f.Name, JavaArchive):
 			dep, err := toDependency(ctx, log, depLabels, explodedFilePath, disableMavenSearch)
 			if err != nil {
-				log.V(3).Error(err, "failed to add dep", "file", explodedFilePath)
+				log.Error(err, "failed to add dep", "file", explodedFilePath)
 				// when we fail to identify a dep we will fallback to
 				// decompiling it ourselves and adding as source
-				if (dep != javaArtifact{}) {
-					outputPath := filepath.Join(
-						filepath.Dir(explodedFilePath), fmt.Sprintf("%s-decompiled",
-							strings.TrimSuffix(f.Name, JavaArchive)), filepath.Base(f.Name))
-					decompileJobs = append(decompileJobs, decompileJob{
-						inputPath:  explodedFilePath,
-						outputPath: outputPath,
-						artifact: javaArtifact{
-							packaging:  JavaArchive,
-							GroupId:    dep.GroupId,
-							ArtifactId: dep.ArtifactId,
-						},
-					})
-				}
+				continue
 			}
-			if (dep != javaArtifact{}) {
-				if dep.foundOnline {
-					dependencies = append(dependencies, dep)
-					// copy this into m2 repo to avoid downloading again
-					groupPath := filepath.Join(strings.Split(dep.GroupId, ".")...)
-					artifactPath := filepath.Join(strings.Split(dep.ArtifactId, ".")...)
-					destPath := filepath.Join(m2Repo, groupPath, artifactPath,
-						dep.Version, filepath.Base(explodedFilePath))
-					if err := CopyFile(explodedFilePath, destPath); err != nil {
-						log.V(8).Error(err, "failed copying jar to m2 local repo")
-					} else {
-						log.V(8).Info("copied jar file", "src", explodedFilePath, "dest", destPath)
-					}
-				} else {
-					// when it isn't found online, decompile it
-					outputPath := filepath.Join(
-						filepath.Dir(explodedFilePath), fmt.Sprintf("%s-decompiled",
-							strings.TrimSuffix(f.Name, JavaArchive)), filepath.Base(f.Name))
-					decompileJobs = append(decompileJobs, decompileJob{
-						inputPath:  explodedFilePath,
-						outputPath: outputPath,
-						artifact: javaArtifact{
-							packaging:  JavaArchive,
-							GroupId:    dep.GroupId,
-							ArtifactId: dep.ArtifactId,
-						},
-					})
-				}
-
-			} else {
-				log.Info("failed to add dependency to list of depdencies - using file to create dummy values", "file", explodedFilePath)
+			if !dep.isValid() {
+				log.Info("failed to create maven coordinates -- using file to create dummy values", "file", explodedFilePath)
 				name, _ := strings.CutSuffix(filepath.Base(explodedFilePath), ".jar")
 				newDep := javaArtifact{
 					foundOnline: false,
@@ -431,11 +395,42 @@ func explode(ctx context.Context, log logr.Logger, archivePath, projectPath stri
 				gropupPath := filepath.Join(strings.Split(EMBEDDED_KONVEYOR_GROUP, ".")...)
 				destPath := filepath.Join(m2Repo, gropupPath, name, "0.0.0-SNAPSHOT", fmt.Sprintf("%s-%s.jar", newDep.ArtifactId, newDep.Version))
 				if err := CopyFile(explodedFilePath, destPath); err != nil {
-					log.V(8).Error(err, "failed copying jar to m2 local repo")
-				} else {
-					log.V(8).Info("copied jar file", "src", explodedFilePath, "dest", destPath)
+					log.Error(err, "failed copying jar to m2 local repo")
+					continue
 				}
+				log.Info("copied jar file", "src", explodedFilePath, "dest", destPath)
+				continue
 			}
+
+			if dep.foundOnline {
+				log.Info("determined that dependency is avaliable in maven central", "dep", dep)
+				dependencies = append(dependencies, dep)
+				// copy this into m2 repo to avoid downloading again
+				groupPath := filepath.Join(strings.Split(dep.GroupId, ".")...)
+				artifactPath, _ := strings.CutSuffix(filepath.Base(explodedFilePath), ".jar")
+				destPath := filepath.Join(m2Repo, groupPath, artifactPath,
+					dep.Version, filepath.Base(explodedFilePath))
+				if err := CopyFile(explodedFilePath, destPath); err != nil {
+					log.Error(err, "failed copying jar to m2 local repo")
+					continue
+				}
+				log.Info("copied jar file", "src", explodedFilePath, "dest", destPath)
+				continue
+			}
+			// when it isn't found online, decompile it
+			log.Info("decompiling and adding to source because we can't determine if it is avalable in maven central", "file", f.Name)
+			outputPath := filepath.Join(
+				filepath.Dir(explodedFilePath), fmt.Sprintf("%s-decompiled",
+					strings.TrimSuffix(f.Name, JavaArchive)), filepath.Base(f.Name))
+			decompileJobs = append(decompileJobs, decompileJob{
+				inputPath:  explodedFilePath,
+				outputPath: outputPath,
+				artifact: javaArtifact{
+					packaging:  JavaArchive,
+					GroupId:    dep.GroupId,
+					ArtifactId: dep.ArtifactId,
+				},
+			})
 		// any other files, move to java project as-is
 		default:
 			baseName := strings.ToValidUTF8(f.Name, "_")
@@ -541,20 +536,26 @@ func toDependency(_ context.Context, log logr.Logger, depToLabels map[string]*de
 		if err == nil {
 			return dep, nil
 		}
-		log.Error(err, "unable to look up dependency by SHA, falling back to get maven cordinates", "jar", jarFile)
+		log.V(3).Error(err, "unable to look up dependency by SHA, falling back to get maven cordinates", "jar", jarFile)
+	} else {
+		log.Info("maven search disabled - looking for dependencies from poms and jar structure")
 	}
-	dep, err := constructArtifactFromPom(log, jarFile)
-	if err != nil {
-		log.V(10).Info("could not construct artifact object from pom for artifact, trying to infer from structure", "jarFile", jarFile, "error", err.Error())
+	dep, err := constructArtifactFromPom(log, jarFile, depToLabels)
+	if err == nil {
+		return dep, nil
+	}
+	log.V(3).Error(err, "could not construct artifact object from pom for artifact, trying to infer from structure", "jarFile", jarFile)
 
-		dep, err = constructArtifactFromStructure(log, jarFile, depToLabels)
-		if err != nil {
-			return javaArtifact{}, err
-		}
+	dep, err = constructArtifactFromStructure(log, jarFile, depToLabels)
+	if err != nil {
+		log.V(3).Error(err, "could not construct artifact object from structure", "jarFile", jarFile)
+		return javaArtifact{}, err
 	}
 
 	return dep, err
 }
+
+var mavenSearchErrorCache error
 
 func constructArtifactFromSHA(log logr.Logger, jarFile string) (javaArtifact, error) {
 	dep := javaArtifact{}
@@ -573,6 +574,12 @@ func constructArtifactFromSHA(log logr.Logger, jarFile string) (javaArtifact, er
 
 	sha1sum := hex.EncodeToString(hash.Sum(nil))
 
+	// if maven search is down, we do not want to keep trying on each dep
+	if mavenSearchErrorCache != nil {
+		log.Info("maven search is down, returning cached error", "error", mavenSearchErrorCache)
+		return dep, mavenSearchErrorCache
+	}
+
 	// Make an HTTPS request to search.maven.org
 	searchURL := fmt.Sprintf("https://search.maven.org/solrsearch/select?q=1:%s&rows=20&wt=json", sha1sum)
 	resp, err := http.Get(searchURL)
@@ -580,6 +587,15 @@ func constructArtifactFromSHA(log logr.Logger, jarFile string) (javaArtifact, er
 		return dep, err
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		statusErr := fmt.Errorf("Maven search is unavailable: %s", resp.Status)
+		// cache the server errors
+		if resp.StatusCode >= 500 {
+			mavenSearchErrorCache = statusErr
+		}
+		return dep, statusErr
+	}
 
 	// Read and parse the JSON response
 	body, err := io.ReadAll(resp.Body)
@@ -617,7 +633,7 @@ func constructArtifactFromSHA(log logr.Logger, jarFile string) (javaArtifact, er
 	}
 	return dep, fmt.Errorf("failed to construct artifact from maven lookup")
 }
-func constructArtifactFromPom(log logr.Logger, jarFile string) (javaArtifact, error) {
+func constructArtifactFromPom(log logr.Logger, jarFile string, depToLabels map[string]*depLabelItem) (javaArtifact, error) {
 	log.V(5).Info("trying to find pom within jar %s to get info", jarFile)
 	dep := javaArtifact{}
 	jar, err := zip.OpenReader(jarFile)
@@ -652,7 +668,23 @@ func constructArtifactFromPom(log logr.Logger, jarFile string) (javaArtifact, er
 					dep.GroupId = strings.TrimSpace(strings.TrimPrefix(line, "groupId="))
 				}
 			}
-
+			// Setting false here because we don't know if it is opensource or not.
+			depName := fmt.Sprintf("%s.%s", dep.GroupId, dep.ArtifactId)
+			groupIdRegex := strings.Join([]string{dep.GroupId, "*"}, ".")
+			if depToLabels[groupIdRegex] != nil {
+				dep.foundOnline = true
+			}
+			l := addDepLabels(depToLabels, depName, dep.foundOnline)
+			for _, l := range l {
+				if l == labels.AsString(provider.DepSourceLabel, javaDepSourceOpenSource) {
+					// Setting here to make things easier.
+					dep.foundOnline = true
+					break
+				}
+				if l == labels.AsString(provider.DepSourceLabel, javaDepSourceInternal) {
+					break
+				}
+			}
 			return dep, err
 		}
 	}
@@ -676,13 +708,17 @@ func constructArtifactFromStructure(log logr.Logger, jarFile string, depToLabels
 		groupIdRegex := strings.Join([]string{groupId, "*"}, ".")
 		if depToLabels[groupIdRegex] != nil {
 			log.V(10).Info(fmt.Sprintf("%s is a public dependency with a group id of: %s", jarFile, groupId))
+			// do a best effort to set some dependency data
 			artifact.GroupId = groupId
+			artifact.ArtifactId = strings.TrimSuffix(filepath.Base(jarFile), ".jar")
+			artifact.Version = "Unknown"
+			// Adding this back to make some things easier.
+			artifact.foundOnline = true
 			return artifact, nil
 		} else {
 			// lets try to remove one segment from the end
 			sgmts = sgmts[:len(sgmts)-1]
 			groupId = strings.Join(sgmts, ".")
-			groupIdRegex = strings.Join([]string{groupId, "*"}, ".")
 		}
 	}
 	log.V(10).Info(fmt.Sprintf("could not find groupId for in our public listing of group id's", jarFile))

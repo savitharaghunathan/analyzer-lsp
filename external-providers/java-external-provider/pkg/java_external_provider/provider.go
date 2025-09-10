@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/go-logr/logr"
+	"github.com/hashicorp/go-version"
 	"github.com/konveyor/analyzer-lsp/engine"
 	"github.com/konveyor/analyzer-lsp/jsonrpc2"
 	"github.com/konveyor/analyzer-lsp/lsp/protocol"
@@ -48,6 +49,7 @@ const (
 	JVM_MAX_MEM_INIT_OPTION       = "jvmMaxMem"
 	FERN_FLOWER_INIT_OPTION       = "fernFlowerPath"
 	DISABLE_MAVEN_SEARCH          = "disableMavenSearch"
+	GRADLE_SOURCES_TASK_FILE      = "gradleSourcesTaskFile"
 )
 
 // Rule Location to location that the bundle understands
@@ -511,23 +513,24 @@ func (p *javaProvider) Init(ctx context.Context, log logr.Logger, config provide
 	}
 
 	svcClient := javaServiceClient{
-		rpc:               rpc,
-		cancelFunc:        cancelFunc,
-		config:            config,
-		cmd:               cmd,
-		bundles:           bundles,
-		workspace:         workspace,
-		log:               log,
-		depToLabels:       map[string]*depLabelItem{},
-		isLocationBinary:  isBinary,
-		mvnInsecure:       mavenInsecure,
-		mvnSettingsFile:   mavenSettingsFile,
-		mvnLocalRepo:      m2Repo,
-		mvnIndexPath:      mavenIndexPath,
-		globalSettings:    globalSettingsFile,
-		depsLocationCache: make(map[string]int),
-		includedPaths:     provider.GetIncludedPathsFromConfig(config, false),
-		cleanExplodedBins: explodedBins,
+		rpc:                rpc,
+		cancelFunc:         cancelFunc,
+		config:             config,
+		cmd:                cmd,
+		bundles:            bundles,
+		workspace:          workspace,
+		log:                log,
+		depToLabels:        map[string]*depLabelItem{},
+		isLocationBinary:   isBinary,
+		mvnInsecure:        mavenInsecure,
+		mvnSettingsFile:    mavenSettingsFile,
+		mvnLocalRepo:       m2Repo,
+		mvnIndexPath:       mavenIndexPath,
+		globalSettings:     globalSettingsFile,
+		depsLocationCache:  make(map[string]int),
+		includedPaths:      provider.GetIncludedPathsFromConfig(config, false),
+		cleanExplodedBins:  explodedBins,
+		disableMavenSearch: disableMavenSearch,
 	}
 
 	if mode == provider.FullAnalysisMode {
@@ -541,7 +544,11 @@ func (p *javaProvider) Init(ctx context.Context, log logr.Logger, config provide
 				log.Error(err, "failed to resolve maven sources jar for location", "location", config.Location)
 			}
 		case gradle:
-			err = svcClient.resolveSourcesJarsForGradle(ctx, fernflower, disableMavenSearch)
+			gradleTaskFile, ok := config.ProviderSpecificConfig[GRADLE_SOURCES_TASK_FILE]
+			if !ok {
+				gradleTaskFile = ""
+			}
+			err = svcClient.resolveSourcesJarsForGradle(ctx, fernflower, disableMavenSearch, gradleTaskFile.(string))
 			if err != nil {
 				log.Error(err, "failed to resolve gradle sources jar for location", "location", config.Location)
 			}
@@ -585,7 +592,7 @@ func (p *javaProvider) Init(ctx context.Context, log logr.Logger, config provide
 	return &svcClient, additionalBuiltinConfig, returnErr
 }
 
-func (s *javaServiceClient) resolveSourcesJarsForGradle(ctx context.Context, fernflower string, disableMavenSearch bool) error {
+func (s *javaServiceClient) resolveSourcesJarsForGradle(ctx context.Context, fernflower string, disableMavenSearch bool, taskFile string) error {
 	ctx, span := tracing.StartNewSpan(ctx, "resolve-sources")
 	defer span.End()
 
@@ -604,11 +611,26 @@ func (s *javaServiceClient) resolveSourcesJarsForGradle(ctx context.Context, fer
 	}
 	defer os.Remove(taskgb)
 
-	// append downloader task
-	taskfile := "/root/.gradle/task.gradle"
-	err = AppendToFile(taskfile, taskgb)
+	// obtain Gradle version, needed for compatibility checks
+	gradleVersion, err := s.GetGradleVersion(ctx)
 	if err != nil {
-		return fmt.Errorf("error appending file %s to %s", taskfile, taskgb)
+		return err
+	}
+
+	// append downloader task
+	if taskFile == "" {
+		// if taskFile is empty, we are in container mode
+		taskFile = "/usr/local/etc/task.gradle"
+	}
+	// if Gradle >= 9.0, use a newer script for downloading sources
+	gradle9version, _ := version.NewVersion("9.0")
+	if gradleVersion.GreaterThanOrEqual(gradle9version) {
+		taskFile = filepath.Join(filepath.Dir(taskFile), "task-v9.gradle")
+	}
+
+	err = AppendToFile(taskFile, taskgb)
+	if err != nil {
+		return fmt.Errorf("error appending file %s to %s", taskFile, taskgb)
 	}
 
 	tmpgbname := filepath.Join(s.config.Location, "toberenamed.gradle")
@@ -624,30 +646,25 @@ func (s *javaServiceClient) resolveSourcesJarsForGradle(ctx context.Context, fer
 	}
 	defer os.Remove(gb)
 
-	// run gradle wrapper with tmp build file
-	exe, err := filepath.Abs(filepath.Join(s.config.Location, "gradlew"))
+	exe, err := s.GetGradleWrapper()
 	if err != nil {
-		return fmt.Errorf("error calculating gradle wrapper path")
-	}
-	if _, err = os.Stat(exe); errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("a gradle wrapper must be present in the project")
+		return err
 	}
 
-	// gradle must run with java 8 (see compatibility matrix)
-	java8home := os.Getenv("JAVA8_HOME")
-	if java8home == "" {
-		return fmt.Errorf("")
+	javaHome, err := s.GetJavaHomeForGradle(ctx)
+	if err != nil {
+		return err
 	}
 
 	args := []string{
 		"konveyorDownloadSources",
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
-	cmd.Env = append(cmd.Env, fmt.Sprintf("JAVA_HOME=%s", java8home))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("JAVA_HOME=%s", javaHome))
 	cmd.Dir = s.config.Location
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
+		return fmt.Errorf("error trying to get sources for Gradle: %w - Gradle output: %s", err, output)
 	}
 
 	s.log.V(8).WithValues("output", output).Info("got gradle output")
@@ -706,8 +723,8 @@ func (s *javaServiceClient) resolveSourcesJarsForGradle(ctx context.Context, fer
 // findGradleCache looks for the folder within the Gradle cache where the actual dependencies are stored
 // by walking the cache directory looking for a directory equal to the given sample group id
 func findGradleCache(sampleGroupId string) (string, error) {
-	// TODO(jmle): atm taking for granted that the cache is going to be here
-	root := "/root/.gradle/caches"
+	gradleHome := findGradleHome()
+	cacheRoot := filepath.Join(gradleHome, "caches")
 	cache := ""
 	walker := func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -719,12 +736,28 @@ func findGradleCache(sampleGroupId string) (string, error) {
 		}
 		return nil
 	}
-	err := filepath.WalkDir(root, walker)
+	err := filepath.WalkDir(cacheRoot, walker)
 	if err != nil {
 		return "", err
 	}
 	cache = filepath.Dir(cache) // return the parent of the found directory
 	return cache, nil
+}
+
+// findGradleHome tries to get the .gradle directory from several places
+// 1. check $GRADLE_HOME
+// 2. check $HOME/.gradle
+// 3. else, set to /root/.gradle
+func findGradleHome() string {
+	gradleHome := os.Getenv("GRADLE_HOME")
+	if gradleHome == "" {
+		home := os.Getenv("HOME")
+		if home == "" {
+			home = "/root"
+		}
+		gradleHome = filepath.Join(home, ".gradle")
+	}
+	return gradleHome
 }
 
 // findGradleArtifact looks for a given artifact jar within the given root dir
