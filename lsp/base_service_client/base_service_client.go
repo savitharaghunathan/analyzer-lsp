@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,9 @@ type LSPServiceClientConfig struct {
 	// The args of the lsp server. Passed to exec.CommandContext.
 	LspServerArgs []string `yaml:"lspServerArgs,omitempty"`
 
+	// Socket configuration for LSP server communication
+	LspServerSocket *SocketConfig `yaml:"lspServerSocket,omitempty"`
+
 	// JSON string that can get sent to the initialize request instead of the
 	// computed options in the service client. Each service client can implement
 	// this differently. Must be a string due to grpc not allowing nested structs.
@@ -57,6 +61,19 @@ type LSPServiceClientConfig struct {
 
 	// Path to a simple binary that lists the dependencies for a given language.
 	DependencyProviderPath string `yaml:"dependencyProviderPath,omitempty"`
+}
+
+// SocketConfig defines socket-based LSP server connection parameters
+type SocketConfig struct {
+	// Network type: "tcp", "unix", "pipe"
+	Network string `yaml:"network,omitempty"`
+	// Address to connect to. Format depends on network:
+	// - TCP: "host:port" or ":port"  
+	// - Unix: "/path/to/socket" (Unix/Linux/macOS)
+	// - Pipe: "\\.\pipe\name" or "name" (Windows named pipes)
+	Address string `yaml:"address,omitempty"`
+	// Connection timeout in seconds (default: 30)
+	TimeoutSeconds int `yaml:"timeoutSeconds,omitempty"`
 }
 
 // Provides a generic `Evaluate` method, that calls the associated method found
@@ -125,7 +142,12 @@ type LSPServiceClientBase struct {
 
 	BaseConfig LSPServiceClientConfig
 
-	Dialer *CmdDialer
+	//  supports multiple connection types like TCP, Unix, named pipes,
+	//  todo: do we need a generic interface for this?
+	Dialer interface {
+		Dial(context.Context) (io.ReadWriteCloser, error)
+	}
+	
 	Conn   *jsonrpc2.Connection
 
 	// Will call this handler's Handle function first. If it returns an
@@ -162,8 +184,18 @@ func NewLSPServiceClientBase(
 		return nil, fmt.Errorf("base config unmarshal error: %w", err)
 	}
 
-	if sc.BaseConfig.LspServerPath == "" {
-		return nil, fmt.Errorf("must provide lspServerPath")
+
+	if sc.BaseConfig.LspServerPath == "" && sc.BaseConfig.LspServerSocket == nil {
+		return nil, fmt.Errorf("must provide either lspServerPath or lspServerSocket")
+	}
+	
+	if sc.BaseConfig.LspServerSocket != nil {
+		if sc.BaseConfig.LspServerSocket.Network == "" {
+			return nil, fmt.Errorf("socket network must be specified")
+		}
+		if sc.BaseConfig.LspServerSocket.Address == "" {
+			return nil, fmt.Errorf("socket address must be specified")
+		}
 	}
 
 	if sc.BaseConfig.LspServerName == "" {
@@ -192,12 +224,32 @@ func NewLSPServiceClientBase(
 	sc.Ctx, sc.CancelFunc = context.WithCancel(ctx)
 	sc.Log = log.WithValues("provider", sc.BaseConfig.LspServerName)
 
-	// launch the lsp command
-	sc.Dialer, err = NewCmdDialer(
-		sc.Ctx, sc.BaseConfig.LspServerPath, sc.BaseConfig.LspServerArgs...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("new cmd dialer error: %w", err)
+	// Create appropriate dialer based on configuration
+	if sc.BaseConfig.LspServerSocket != nil {
+		// Use socket 
+		timeout := time.Duration(sc.BaseConfig.LspServerSocket.TimeoutSeconds) * time.Second
+		if timeout == 0 {
+			timeout = 30 * time.Second
+		}
+		
+		socketDialer, err := NewSocketDialer(
+			sc.BaseConfig.LspServerSocket.Network,
+			sc.BaseConfig.LspServerSocket.Address,
+			timeout,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("new socket dialer error: %w", err)
+		}
+		sc.Dialer = socketDialer
+	} else {
+		// Use command dialer
+		cmdDialer, err := NewCmdDialer(
+			sc.Ctx, sc.BaseConfig.LspServerPath, sc.BaseConfig.LspServerArgs...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("new cmd dialer error: %w", err)
+		}
+		sc.Dialer = cmdDialer
 	}
 
 	time.Sleep(5 * time.Second)
