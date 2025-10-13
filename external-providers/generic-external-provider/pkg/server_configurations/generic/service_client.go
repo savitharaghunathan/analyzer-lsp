@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 
 	"github.com/go-logr/logr"
 	jsonrpc2 "github.com/konveyor/analyzer-lsp/jsonrpc2_v2"
@@ -41,13 +42,17 @@ import (
 
 // createRPCConnection creates a real jsonrpc2.Connection using RPC client as transport
 func createRPCConnection(ctx context.Context, rpc provider.RPCClient) (*jsonrpc2.Connection, error) {
+	log.Printf("[RPC DEBUG] createRPCConnection() starting...")
 	dialer := &rpcDialer{rpc: rpc}
 	
+	log.Printf("[RPC DEBUG] Calling jsonrpc2.Dial()...")
 	conn, err := jsonrpc2.Dial(ctx, dialer, jsonrpc2.ConnectionOptions{})
 	if err != nil {
+		log.Printf("[RPC DEBUG] jsonrpc2.Dial() failed: %v", err)
 		return nil, fmt.Errorf("failed to create RPC connection: %w", err)
 	}
 	
+	log.Printf("[RPC DEBUG] jsonrpc2.Dial() succeeded, connection created")
 	return conn, nil
 }
 
@@ -57,7 +62,10 @@ type rpcDialer struct {
 }
 
 func (d *rpcDialer) Dial(ctx context.Context) (io.ReadWriteCloser, error) {
-	return &rpcTransport{rpc: d.rpc, ctx: ctx}, nil
+	log.Printf("[RPC DEBUG] rpcDialer.Dial() called, creating rpcTransport...")
+	transport := &rpcTransport{rpc: d.rpc, ctx: ctx}
+	log.Printf("[RPC DEBUG] rpcDialer.Dial() completed, returning transport")
+	return transport, nil
 }
 
 // rpcTransport implements io.ReadWriteCloser and bridges JSON-RPC clients
@@ -67,15 +75,20 @@ type rpcTransport struct {
 }
 
 func (t *rpcTransport) Read(p []byte) (n int, err error) {
+	log.Printf("[RPC DEBUG] rpcTransport.Read() called with buffer size %d", len(p))
 	// For JSON-RPC client bridge, we don't handle raw reads
 	// The jsonrpc2 library will handle the protocol
+	log.Printf("[RPC DEBUG] rpcTransport.Read() returning EOF")
 	return 0, io.EOF
 }
 
 func (t *rpcTransport) Write(p []byte) (n int, err error) {
+	log.Printf("[RPC DEBUG] rpcTransport.Write() called with message: %s", string(p))
+	
 	// Parse the JSON-RPC message and route to appropriate RPC client method
 	var msg map[string]interface{}
 	if err := json.Unmarshal(p, &msg); err != nil {
+		log.Printf("[RPC DEBUG] Failed to parse JSON-RPC message: %v", err)
 		return 0, fmt.Errorf("failed to parse JSON-RPC message: %w", err)
 	}
 
@@ -83,20 +96,29 @@ func (t *rpcTransport) Write(p []byte) (n int, err error) {
 	params := msg["params"]
 	id := msg["id"]
 
+	log.Printf("[RPC DEBUG] Parsed message - method: %s, id: %v, params: %v", method, id, params)
+
 	if id != nil {
 		// Request with response expected
+		log.Printf("[RPC DEBUG] Making RPC Call to method: %s", method)
 		err := t.rpc.Call(t.ctx, method, params, nil)
 		if err != nil {
+			log.Printf("[RPC DEBUG] RPC Call failed: %v", err)
 			return 0, err
 		}
+		log.Printf("[RPC DEBUG] RPC Call succeeded for method: %s", method)
 	} else {
 		// Notification
+		log.Printf("[RPC DEBUG] Making RPC Notify to method: %s", method)
 		err := t.rpc.Notify(t.ctx, method, params)
 		if err != nil {
+			log.Printf("[RPC DEBUG] RPC Notify failed: %v", err)
 			return 0, err
 		}
+		log.Printf("[RPC DEBUG] RPC Notify succeeded for method: %s", method)
 	}
 
+	log.Printf("[RPC DEBUG] rpcTransport.Write() completed successfully")
 	return len(p), nil
 }
 
@@ -274,7 +296,28 @@ func (sc *GenericServiceClient) EvaluateEcho(ctx context.Context, cap string, in
 
 // Evaluate method - now handled by LSPServiceClientEvaluator for both modes
 func (sc *GenericServiceClient) Evaluate(ctx context.Context, cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
-	return sc.LSPServiceClientEvaluator.Evaluate(ctx, cap, conditionInfo)
+	log.Printf("[RPC DEBUG] GenericServiceClient.Evaluate() called with capability: %s", cap)
+	log.Printf("[RPC DEBUG] GenericServiceClient has RPC client: %v", sc.rpc != nil)
+	log.Printf("[RPC DEBUG] GenericServiceClient has LSPServiceClientBase: %v", sc.LSPServiceClientBase != nil)
+	log.Printf("[RPC DEBUG] GenericServiceClient has LSPServiceClientEvaluator: %v", sc.LSPServiceClientEvaluator != nil)
+	
+	if sc.LSPServiceClientBase != nil && sc.LSPServiceClientBase.Conn != nil {
+		log.Printf("[RPC DEBUG] LSPServiceClientBase.Conn exists")
+	} else {
+		log.Printf("[RPC DEBUG] LSPServiceClientBase.Conn is nil")
+	}
+	
+	log.Printf("[RPC DEBUG] Calling LSPServiceClientEvaluator.Evaluate()...")
+	result, err := sc.LSPServiceClientEvaluator.Evaluate(ctx, cap, conditionInfo)
+	
+	if err != nil {
+		log.Printf("[RPC DEBUG] LSPServiceClientEvaluator.Evaluate() failed: %v", err)
+	} else {
+		log.Printf("[RPC DEBUG] LSPServiceClientEvaluator.Evaluate() succeeded, matched: %v, incidents: %d", 
+			result.Matched, len(result.Incidents))
+	}
+	
+	return result, err
 }
 
 // Stop method that handles both RPC and process modes
