@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/go-logr/logr"
+	jsonrpc2 "github.com/konveyor/analyzer-lsp/jsonrpc2_v2"
 	base "github.com/konveyor/analyzer-lsp/lsp/base_service_client"
 	"github.com/konveyor/analyzer-lsp/lsp/protocol"
 	"github.com/konveyor/analyzer-lsp/provider"
@@ -37,6 +39,71 @@ import (
 // 6. In constants.go, add `NewFooServiceClient` to SupportedLanguages and
 //    `FooServiceClientCapabilities` to SupportedCapabilities
 
+// createRPCConnection creates a real jsonrpc2.Connection using RPC client as transport
+func createRPCConnection(ctx context.Context, rpc provider.RPCClient) (*jsonrpc2.Connection, error) {
+	dialer := &rpcDialer{rpc: rpc}
+	
+	conn, err := jsonrpc2.Dial(ctx, dialer, jsonrpc2.ConnectionOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RPC connection: %w", err)
+	}
+	
+	return conn, nil
+}
+
+// rpcDialer implements jsonrpc2.Dialer using provider.RPCClient
+type rpcDialer struct {
+	rpc provider.RPCClient
+}
+
+func (d *rpcDialer) Dial(ctx context.Context) (io.ReadWriteCloser, error) {
+	return &rpcTransport{rpc: d.rpc, ctx: ctx}, nil
+}
+
+// rpcTransport implements io.ReadWriteCloser and bridges JSON-RPC clients
+type rpcTransport struct {
+	rpc provider.RPCClient
+	ctx context.Context
+}
+
+func (t *rpcTransport) Read(p []byte) (n int, err error) {
+	// For JSON-RPC client bridge, we don't handle raw reads
+	// The jsonrpc2 library will handle the protocol
+	return 0, io.EOF
+}
+
+func (t *rpcTransport) Write(p []byte) (n int, err error) {
+	// Parse the JSON-RPC message and route to appropriate RPC client method
+	var msg map[string]interface{}
+	if err := json.Unmarshal(p, &msg); err != nil {
+		return 0, fmt.Errorf("failed to parse JSON-RPC message: %w", err)
+	}
+
+	method, _ := msg["method"].(string)
+	params := msg["params"]
+	id := msg["id"]
+
+	if id != nil {
+		// Request with response expected
+		err := t.rpc.Call(t.ctx, method, params, nil)
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		// Notification
+		err := t.rpc.Notify(t.ctx, method, params)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	return len(p), nil
+}
+
+func (t *rpcTransport) Close() error {
+	return nil
+}
+
 type GenericServiceClientConfig struct {
 	base.LSPServiceClientConfig `yaml:",inline"`
 }
@@ -59,13 +126,32 @@ type GenericServiceClient struct {
 type GenericServiceClientBuilder struct{}
 
 func (g *GenericServiceClientBuilder) Init(ctx context.Context, log logr.Logger, c provider.InitConfig) (provider.ServiceClient, error) {
-	// Check for RPC mode first (same pattern as Java provider)
+
 	if c.RPC != nil {
-		return &GenericServiceClient{
+		sc := &GenericServiceClient{
 			rpc:    c.RPC,
 			config: c,
 			log:    log,
-		}, nil
+		}
+
+		// Create a real jsonrpc2.Connection using RPC client as transport
+		conn, err := createRPCConnection(ctx, c.RPC)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create RPC connection: %w", err)
+		}
+		
+		scBase := &base.LSPServiceClientBase{
+			Conn: conn,
+		}
+		sc.LSPServiceClientBase = scBase
+
+		eval, err := base.NewLspServiceClientEvaluator[*GenericServiceClient](sc, g.GetGenericServiceClientCapabilities(log))
+		if err != nil {
+			return nil, fmt.Errorf("lsp service client evaluator error: %w", err)
+		}
+		sc.LSPServiceClientEvaluator = eval
+
+		return sc, nil
 	}
 
 	sc := &GenericServiceClient{}
@@ -186,23 +272,14 @@ func (sc *GenericServiceClient) EvaluateEcho(ctx context.Context, cap string, in
 	}, nil
 }
 
-func (sc *GenericServiceClient) isRPCMode() bool {
-	return sc.rpc != nil
-}
-
-// Evaluate method that handles both RPC and process modes
+// Evaluate method - now handled by LSPServiceClientEvaluator for both modes
 func (sc *GenericServiceClient) Evaluate(ctx context.Context, cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
-	if sc.isRPCMode() {
-		return sc.evaluateRPC(ctx, cap, conditionInfo)
-	}
-
-	// Process mode: use evaluator (existing behavior)
 	return sc.LSPServiceClientEvaluator.Evaluate(ctx, cap, conditionInfo)
 }
 
 // Stop method that handles both RPC and process modes
 func (sc *GenericServiceClient) Stop() {
-	if sc.isRPCMode() {
+	if sc.rpc != nil {
 		// RPC mode: just cleanup, don't kill external process
 		sc.log.Info("stopping RPC-based generic service client")
 		return
@@ -212,58 +289,4 @@ func (sc *GenericServiceClient) Stop() {
 	if sc.LSPServiceClientBase != nil {
 		sc.LSPServiceClientBase.Stop()
 	}
-}
-
-// RPC-based evaluation (forwards to external RPC client like Java provider)
-func (sc *GenericServiceClient) evaluateRPC(ctx context.Context, cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
-	switch cap {
-	case "referenced":
-		return sc.evaluateReferencedRPC(ctx, conditionInfo)
-	case "echo":
-		// Reuse existing echo implementation
-		return sc.EvaluateEcho(ctx, cap, conditionInfo)
-	default:
-		return provider.ProviderEvaluateResponse{}, fmt.Errorf("capability '%s' not supported in RPC mode", cap)
-	}
-}
-
-// RPC-based referenced evaluation using standard LSP methods
-func (sc *GenericServiceClient) evaluateReferencedRPC(ctx context.Context, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
-	var cond base.ReferencedCondition
-	err := yaml.Unmarshal(conditionInfo, &cond)
-	if err != nil {
-		return provider.ProviderEvaluateResponse{}, fmt.Errorf("unable to get query info: %v", err)
-	}
-
-	// Use standard LSP workspace/symbol method (supported by most language servers)
-	params := map[string]interface{}{
-		"query": cond.Referenced.Pattern,
-	}
-
-	var symbols []interface{}
-	err = sc.rpc.Call(ctx, "workspace/symbol", params, &symbols)
-	if err != nil {
-		sc.log.Error(err, "failed to call workspace/symbol via RPC")
-		return provider.ProviderEvaluateResponse{}, err
-	}
-
-	// Convert symbols to incidents
-	incidents := []provider.IncidentContext{}
-	for _, symbol := range symbols {
-		if symbolMap, ok := symbol.(map[string]interface{}); ok {
-			incident := provider.IncidentContext{
-				Variables: map[string]interface{}{
-					"name":     symbolMap["name"],
-					"kind":     symbolMap["kind"],
-					"location": symbolMap["location"],
-				},
-			}
-			incidents = append(incidents, incident)
-		}
-	}
-
-	return provider.ProviderEvaluateResponse{
-		Matched:   len(incidents) > 0,
-		Incidents: incidents,
-	}, nil
 }
