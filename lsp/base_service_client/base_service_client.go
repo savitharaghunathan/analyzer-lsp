@@ -549,6 +549,7 @@ func (sc *LSPServiceClientBase) GetAllDeclarations(ctx context.Context, workspac
 }
 
 func (sc *LSPServiceClientBase) GetAllReferences(ctx context.Context, location protocol.Location) []protocol.Location {
+	sc.Log.Info("GetAllReferences: starting", "URI", location.URI, "position", location.Range.Start)
 	params := &protocol.ReferenceParams{
 		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
 			TextDocument: protocol.TextDocumentIdentifier{
@@ -561,10 +562,14 @@ func (sc *LSPServiceClientBase) GetAllReferences(ctx context.Context, location p
 		},
 	}
 
+	sc.Log.Info("GetAllReferences: making textDocument/references call", "params", params)
 	res := []protocol.Location{}
 	err := sc.Conn.Call(ctx, "textDocument/references", params).Await(ctx, &res)
 	if err != nil {
+		sc.Log.Error(err, "GetAllReferences: textDocument/references call failed")
 		fmt.Printf("Error rpc: %v", err)
+	} else {
+		sc.Log.Info("GetAllReferences: textDocument/references call succeeded", "referenceCount", len(res))
 	}
 
 	return res
