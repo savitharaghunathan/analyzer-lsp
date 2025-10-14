@@ -2150,3 +2150,29 @@ func (t *Or_textDocument_declaration) UnmarshalJSON(x []byte) error {
 	}
 	return &UnmarshalError{"unmarshal failed to match one of [Declaration []DeclarationLink]"}
 }
+
+// Custom UnmarshalJSON for Range to handle both LSP-compliant object format
+// and gopls non-compliant array format
+func (r *Range) UnmarshalJSON(data []byte) error {
+	// First try standard LSP format: {"start": {...}, "end": {...}}
+	type StandardRange Range
+	var stdRange StandardRange
+	if err := json.Unmarshal(data, &stdRange); err == nil {
+		*r = Range(stdRange)
+		return nil
+	}
+	
+	// Fall back to gopls array format: [{"line": ..., "character": ...}, {"line": ..., "character": ...}]
+	var positions []Position
+	if err := json.Unmarshal(data, &positions); err != nil {
+		return err
+	}
+	
+	if len(positions) != 2 {
+		return fmt.Errorf("expected exactly 2 positions in range array, got %d", len(positions))
+	}
+	
+	r.Start = positions[0]
+	r.End = positions[1]
+	return nil
+}
