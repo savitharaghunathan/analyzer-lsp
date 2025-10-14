@@ -2176,3 +2176,40 @@ func (r *Range) UnmarshalJSON(data []byte) error {
 	r.End = positions[1]
 	return nil
 }
+
+// Custom UnmarshalJSON for Location to handle both LSP-compliant string URI format
+// and IDE object URI format
+func (l *Location) UnmarshalJSON(data []byte) error {
+	// Define a temporary struct to handle the standard case
+	type StandardLocation struct {
+		URI   json.RawMessage `json:"uri"`
+		Range Range           `json:"range"`
+	}
+	
+	var stdLoc StandardLocation
+	if err := json.Unmarshal(data, &stdLoc); err != nil {
+		return err
+	}
+	
+	// Handle URI field - try string format first, then object format
+	var uriStr string
+	if err := json.Unmarshal(stdLoc.URI, &uriStr); err == nil {
+		// Standard LSP string format: "file://..."
+		l.URI = DocumentURI(uriStr)
+	} else {
+		// IDE object format: {"$mid": 1, "path": "...", "scheme": "file"}
+		var uriObj struct {
+			Scheme string `json:"scheme"`
+			Path   string `json:"path"`
+		}
+		if err := json.Unmarshal(stdLoc.URI, &uriObj); err != nil {
+			return fmt.Errorf("URI field is neither string nor valid object format: %v", err)
+		}
+		// Convert object format to standard URI string
+		l.URI = DocumentURI(fmt.Sprintf("%s://%s", uriObj.Scheme, uriObj.Path))
+	}
+	
+	// Set the range
+	l.Range = stdLoc.Range
+	return nil
+}
