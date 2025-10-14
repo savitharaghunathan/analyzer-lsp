@@ -40,19 +40,24 @@ type ReferencedCondition struct {
 // references.
 func EvaluateReferenced[T base](t T, ctx ctx, cap string, info []byte) (resp, error) {
 	sc := t.GetLSPServiceClientBase()
+	sc.Log.Info("EvaluateReferenced: starting evaluation", "capability", cap)
 
 	var cond ReferencedCondition
 	err := yaml.Unmarshal(info, &cond)
 	if err != nil {
+		sc.Log.Error(err, "EvaluateReferenced: failed to unmarshal condition")
 		return resp{}, fmt.Errorf("error unmarshaling query info")
 	}
 
 	query := cond.Referenced.Pattern
 	if query == "" {
+		sc.Log.Error(fmt.Errorf("empty query pattern"), "EvaluateReferenced: no query pattern provided")
 		return resp{}, fmt.Errorf("unable to get query info")
 	}
 
+	sc.Log.Info("EvaluateReferenced: calling GetAllDeclarations", "query", query, "workspaceFolders", sc.BaseConfig.WorkspaceFolders)
 	symbols := sc.GetAllDeclarations(ctx, sc.BaseConfig.WorkspaceFolders, query)
+	sc.Log.Info("EvaluateReferenced: GetAllDeclarations returned", "symbolCount", len(symbols))
 
 	incidents := []provider.IncidentContext{}
 	incidentsMap := make(map[string]provider.IncidentContext) // Remove duplicates
