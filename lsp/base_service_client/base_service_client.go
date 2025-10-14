@@ -110,6 +110,113 @@ type HasLSPServiceClientBase interface {
 	GetLSPServiceClientBase() *LSPServiceClientBase
 }
 
+type RPCConn interface {
+	Notify(ctx context.Context, method string, params interface{}) (err error)
+	Call(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall
+	Close() error
+}
+
+type RPCConnReturn interface {
+	ID() jsonrpc2.ID
+	IsReady() bool
+	Await(ctx context.Context, result interface{}) error
+}
+
+type rpcConnReturnWrapper struct {
+	err    error
+	result []byte
+	log    logr.Logger
+	method string
+}
+
+func (r *rpcConnReturnWrapper) ID() jsonrpc2.ID {
+	return jsonrpc2.StringID("unimplemented")
+}
+
+func (r *rpcConnReturnWrapper) IsReady() bool {
+	return true
+}
+
+func (r *rpcConnReturnWrapper) Await(ctx context.Context, result interface{}) error {
+	r.log.V(2).Info("RPC wrapper: awaiting result", "method", r.method, "hasError", r.err != nil)
+	if r.err != nil {
+		r.log.Error(r.err, "RPC wrapper: returning error from await", "method", r.method)
+		return r.err
+	}
+	r.log.V(2).Info("RPC wrapper: unmarshaling result", "method", r.method, "resultSize", len(r.result), "targetType", fmt.Sprintf("%T", result))
+	err := json.Unmarshal(r.result, result)
+	if err != nil {
+		r.log.Error(err, "RPC wrapper: failed to unmarshal result", "method", r.method)
+		return err
+	}
+	r.log.V(2).Info("RPC wrapper: successfully unmarshaled result", "method", r.method)
+	return nil
+}
+
+type oldRpcClientWrapper struct {
+	rpc provider.RPCClient
+	log logr.Logger
+}
+
+func (o *oldRpcClientWrapper) Notify(ctx context.Context, method string, params interface{}) (err error) {
+	o.log.Info("RPC wrapper: sending notification", "method", method)
+	err = o.rpc.Notify(ctx, method, params)
+	if err != nil {
+		o.log.Error(err, "RPC wrapper: notification failed", "method", method)
+	} else {
+		o.log.V(2).Info("RPC wrapper: notification completed successfully", "method", method)
+	}
+	return err
+}
+
+func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall {
+	o.log.Info("RPC wrapper: sending call", "method", method)
+	result := []interface{}{}
+	err := o.rpc.Call(ctx, method, params, &result)
+	if err != nil {
+		o.log.Error(err, "RPC wrapper: call failed", "method", method)
+		return &rpcConnReturnWrapper{
+			err:    err,
+			log:    o.log,
+			method: method,
+		}
+	}
+	
+	o.log.V(2).Info("RPC wrapper: call completed, marshaling result", "method", method, "resultType", fmt.Sprintf("%T", result))
+	
+	// Marshal the result back to JSON bytes
+	resultBytes, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		o.log.Error(marshalErr, "RPC wrapper: failed to marshal result", "method", method)
+		return &rpcConnReturnWrapper{
+			err:    marshalErr,
+			log:    o.log,
+			method: method,
+		}
+	}
+	
+	o.log.V(2).Info("RPC wrapper: call successful", "method", method, "resultSize", len(resultBytes))
+	return &rpcConnReturnWrapper{
+		err:    nil,
+		result: resultBytes,
+		log:    o.log,
+		method: method,
+	}
+}
+
+func (o *oldRpcClientWrapper) Close() error {
+	// The old provider.RPCClient interface doesn't have a Close method
+	// so we'll just return nil for now
+	o.log.Info("RPC wrapper: close requested (no-op for old RPC client)")
+	return nil
+}
+
+// NewRPCConnWrapper creates an RPCConn wrapper around an old provider.RPCClient
+func NewRPCConnWrapper(rpc provider.RPCClient, log logr.Logger) RPCConn {
+	log.Info("Creating RPC connection wrapper for old provider.RPCClient")
+	return &oldRpcClientWrapper{rpc: rpc, log: log}
+}
+
 // Almost everything implemented to satisfy the protocol.ServiceClient
 // interface. The only thing that's not is `Evaluate`, intentionally.
 //
@@ -126,7 +233,7 @@ type LSPServiceClientBase struct {
 	BaseConfig LSPServiceClientConfig
 
 	Dialer *CmdDialer
-	Conn   *jsonrpc2.Connection
+	Conn   RPCConn
 
 	// Will call this handler's Handle function first. If it returns an
 	// ErrMethodNotFound or ErrNotHandled we use the LSPServiceClientBase's Handle

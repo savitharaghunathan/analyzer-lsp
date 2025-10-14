@@ -96,7 +96,7 @@ type inFlightState struct {
 	closer   io.Closer
 	closeErr error // error returned from closer.Close
 
-	outgoingCalls         map[ID]*AsyncCall // calls only
+	outgoingCalls         map[ID]*AsyncCallImpl // calls only
 	outgoingNotifications int               // # of notifications awaiting "write"
 
 	// incoming stores the total number of incoming calls and notifications
@@ -312,7 +312,7 @@ func (c *Connection) Notify(ctx context.Context, method string, params interface
 // be handed to the method invoked.
 // You do not have to wait for the response, it can just be ignored if not needed.
 // If sending the call failed, the response will be ready and have the error in it.
-func (c *Connection) Call(ctx context.Context, method string, params interface{}) *AsyncCall {
+func (c *Connection) Call(ctx context.Context, method string, params interface{}) AsyncCall {
 	// Generate a new request identifier.
 	id := Int64ID(atomic.AddInt64(&c.seq, 1))
 	ctx, endSpan := event.Start(ctx, method,
@@ -321,7 +321,7 @@ func (c *Connection) Call(ctx context.Context, method string, params interface{}
 		tag.RPCID.Of(fmt.Sprintf("%q", id)),
 	)
 
-	ac := &AsyncCall{
+	ac := &AsyncCallImpl{
 		id:      id,
 		ready:   make(chan struct{}),
 		ctx:     ctx,
@@ -343,7 +343,7 @@ func (c *Connection) Call(ctx context.Context, method string, params interface{}
 			return
 		}
 		if s.outgoingCalls == nil {
-			s.outgoingCalls = make(map[ID]*AsyncCall)
+			s.outgoingCalls = make(map[ID]*AsyncCallImpl)
 		}
 		s.outgoingCalls[ac.id] = ac
 	})
@@ -372,7 +372,13 @@ func (c *Connection) Call(ctx context.Context, method string, params interface{}
 	return ac
 }
 
-type AsyncCall struct {
+type AsyncCall interface {
+	ID() ID
+	IsReady() bool
+	Await(ctx context.Context, result interface{}) error
+}
+
+type AsyncCallImpl struct {
 	id       ID
 	ready    chan struct{} // closed after response has been set and span has been ended
 	response *Response
@@ -382,12 +388,12 @@ type AsyncCall struct {
 
 // ID used for this call.
 // This can be used to cancel the call if needed.
-func (ac *AsyncCall) ID() ID { return ac.id }
+func (ac *AsyncCallImpl) ID() ID { return ac.id }
 
 // IsReady can be used to check if the result is already prepared.
 // This is guaranteed to return true on a result for which Await has already
 // returned, or a call that failed to send in the first place.
-func (ac *AsyncCall) IsReady() bool {
+func (ac *AsyncCallImpl) IsReady() bool {
 	select {
 	case <-ac.ready:
 		return true
@@ -397,7 +403,7 @@ func (ac *AsyncCall) IsReady() bool {
 }
 
 // retire processes the response to the call.
-func (ac *AsyncCall) retire(response *Response) {
+func (ac *AsyncCallImpl) retire(response *Response) {
 	select {
 	case <-ac.ready:
 		panic(fmt.Sprintf("jsonrpc2: retire called twice for ID %v", ac.id))
@@ -416,7 +422,7 @@ func (ac *AsyncCall) retire(response *Response) {
 
 // Await waits for (and decodes) the results of a Call.
 // The response will be unmarshaled from JSON into the result.
-func (ac *AsyncCall) Await(ctx context.Context, result interface{}) error {
+func (ac *AsyncCallImpl) Await(ctx context.Context, result interface{}) error {
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("ctx.Done error: %w", ctx.Err())
