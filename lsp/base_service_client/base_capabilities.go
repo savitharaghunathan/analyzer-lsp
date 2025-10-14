@@ -65,6 +65,7 @@ func EvaluateReferenced[T base](t T, ctx ctx, cap string, info []byte) (resp, er
 	sc.Log.Info("EvaluateReferenced: starting to process symbols for references", "symbolCount", len(symbols))
 	for i, s := range symbols {
 		sc.Log.Info("EvaluateReferenced: processing symbol", "symbolIndex", i, "symbolName", s.Name)
+		sc.Log.V(2).Info("EvaluateReferenced: symbol location details", "symbolIndex", i, "locationType", fmt.Sprintf("%T", s.Location.Value), "locationValue", s.Location.Value)
 		
 		// Handle the union type properly
 		var location protocol.Location
@@ -73,13 +74,6 @@ func EvaluateReferenced[T base](t T, ctx ctx, cap string, info []byte) (resp, er
 			location = v
 		case *protocol.Location:
 			location = *v
-		case protocol.PLocationMsg_workspace_symbol:
-			// Convert from PLocationMsg_workspace_symbol to Location
-			// PLocationMsg_workspace_symbol only has URI, no Range, so use empty range
-			location = protocol.Location{
-				URI:   v.URI,
-				Range: protocol.Range{},
-			}
 		default:
 			sc.Log.Error(fmt.Errorf("unexpected location type: %T", v), "EvaluateReferenced: skipping symbol due to location type", "symbolName", s.Name)
 			continue
