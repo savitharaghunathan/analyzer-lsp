@@ -171,6 +171,14 @@ func (o *oldRpcClientWrapper) Notify(ctx context.Context, method string, params 
 
 func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall {
 	o.log.Info("RPC wrapper: sending call", "method", method)
+	
+	// For workspace/symbol calls, we need to preserve the exact JSON structure
+	// to avoid corrupting union types during marshaling/unmarshaling
+	if method == "workspace/symbol" {
+		return o.handleWorkspaceSymbolCall(ctx, method, params)
+	}
+	
+	// For other methods, use the original approach
 	result := []interface{}{}
 	err := o.rpc.Call(ctx, method, params, &result)
 	if err != nil {
@@ -199,6 +207,30 @@ func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params in
 	return &rpcConnReturnWrapper{
 		err:    nil,
 		result: resultBytes,
+		log:    o.log,
+		method: method,
+	}
+}
+
+func (o *oldRpcClientWrapper) handleWorkspaceSymbolCall(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall {
+	o.log.V(2).Info("RPC wrapper: handling workspace/symbol call with special JSON preservation")
+	
+	// Use json.RawMessage to preserve the exact JSON structure returned by the LSP server
+	var result json.RawMessage
+	err := o.rpc.Call(ctx, method, params, &result)
+	if err != nil {
+		o.log.Error(err, "RPC wrapper: workspace/symbol call failed", "method", method)
+		return &rpcConnReturnWrapper{
+			err:    err,
+			log:    o.log,
+			method: method,
+		}
+	}
+	
+	o.log.V(2).Info("RPC wrapper: workspace/symbol call successful, preserving raw JSON", "method", method, "resultSize", len(result))
+	return &rpcConnReturnWrapper{
+		err:    nil,
+		result: []byte(result),
 		log:    o.log,
 		method: method,
 	}
