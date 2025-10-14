@@ -73,6 +73,13 @@ func EvaluateReferenced[T base](t T, ctx ctx, cap string, info []byte) (resp, er
 			location = v
 		case *protocol.Location:
 			location = *v
+		case protocol.PLocationMsg_workspace_symbol:
+			// Convert from PLocationMsg_workspace_symbol to Location
+			// PLocationMsg_workspace_symbol only has URI, no Range, so use empty range
+			location = protocol.Location{
+				URI:   v.URI,
+				Range: protocol.Range{},
+			}
 		default:
 			sc.Log.Error(fmt.Errorf("unexpected location type: %T", v), "EvaluateReferenced: skipping symbol due to location type", "symbolName", s.Name)
 			continue
