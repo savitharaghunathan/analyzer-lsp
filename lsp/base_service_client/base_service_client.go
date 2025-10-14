@@ -442,22 +442,31 @@ func (sc *LSPServiceClientBase) GetAllDeclarations(ctx context.Context, workspac
 	// TODO(jsussman) Should we change protocol.WorkspaceSymbol to
 	// protocol.SymbolInformation?
 
+	sc.Log.Info("GetAllDeclarations: starting", "query", query, "workspaceFolders", workspaceFolders)
 	var symbols []protocol.WorkspaceSymbol
 
 	regex, regexErr := regexp.Compile(query)
+	sc.Log.Info("GetAllDeclarations: regex compilation", "query", query, "regexErr", regexErr)
 
 	// Client may or may not support the "workspace/symbol" method, so we must
 	// check before calling.
+	sc.Log.Info("GetAllDeclarations: checking server capabilities", "supportsWorkspaceSymbol", sc.ServerCapabilities.Supports("workspace/symbol"))
 
 	if sc.ServerCapabilities.Supports("workspace/symbol") {
 		params := protocol.WorkspaceSymbolParams{
 			Query: query,
 		}
 
+		sc.Log.Info("GetAllDeclarations: making workspace/symbol call", "params", params)
 		err := sc.Conn.Call(ctx, "workspace/symbol", params).Await(ctx, &symbols)
 		if err != nil {
+			sc.Log.Error(err, "GetAllDeclarations: workspace/symbol call failed")
 			fmt.Printf("error: %v\n", err)
+		} else {
+			sc.Log.Info("GetAllDeclarations: workspace/symbol call succeeded", "symbolCount", len(symbols))
 		}
+	} else {
+		sc.Log.Info("GetAllDeclarations: workspace/symbol not supported, skipping LSP call")
 	}
 
 	if regexErr != nil {
