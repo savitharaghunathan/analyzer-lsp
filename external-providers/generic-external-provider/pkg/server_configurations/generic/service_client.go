@@ -97,7 +97,9 @@ func (g *GenericServiceClientBuilder) Init(ctx context.Context, log logr.Logger,
 			},
 			// Set default server capabilities for RPC mode
 			ServerCapabilities: protocol.ServerCapabilities{
-				WorkspaceSymbolProvider: &protocol.WorkspaceSymbolOptions{},
+				WorkspaceSymbolProvider: &protocol.Or_ServerCapabilities_workspaceSymbolProvider{
+					Value: true,
+				},
 			},
 		}
 		sc.LSPServiceClientBase = scBase
