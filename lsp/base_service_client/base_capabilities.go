@@ -62,8 +62,25 @@ func EvaluateReferenced[T base](t T, ctx ctx, cap string, info []byte) (resp, er
 	incidents := []provider.IncidentContext{}
 	incidentsMap := make(map[string]provider.IncidentContext) // Remove duplicates
 
-	for _, s := range symbols {
-		references := sc.GetAllReferences(ctx, s.Location.Value.(protocol.Location))
+	sc.Log.Info("EvaluateReferenced: starting to process symbols for references", "symbolCount", len(symbols))
+	for i, s := range symbols {
+		sc.Log.Info("EvaluateReferenced: processing symbol", "symbolIndex", i, "symbolName", s.Name)
+		
+		// Handle the union type properly
+		var location protocol.Location
+		switch v := s.Location.Value.(type) {
+		case protocol.Location:
+			location = v
+		case *protocol.Location:
+			location = *v
+		default:
+			sc.Log.Error(fmt.Errorf("unexpected location type: %T", v), "EvaluateReferenced: skipping symbol due to location type", "symbolName", s.Name)
+			continue
+		}
+		
+		sc.Log.Info("EvaluateReferenced: getting references for symbol", "symbolIndex", i, "symbolName", s.Name, "symbolURI", location.URI)
+		references := sc.GetAllReferences(ctx, location)
+		sc.Log.Info("EvaluateReferenced: got references for symbol", "symbolIndex", i, "symbolName", s.Name, "referenceCount", len(references))
 
 		breakEarly := false
 		for _, ref := range references {
