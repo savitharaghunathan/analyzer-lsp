@@ -58,14 +58,53 @@ type GenericServiceClient struct {
 
 type GenericServiceClientBuilder struct{}
 
+// createRPCConnection wraps an RPC client to create a proper jsonrpc2 connection
+func createRPCConnection(ctx context.Context, rpc provider.RPCClient, log logr.Logger) (base.RPCConn, error) {
+	log.Info("Creating RPC connection wrapper")
+	if rpc == nil {
+		log.Error(fmt.Errorf("RPC client is nil"), "Failed to create RPC connection")
+		return nil, fmt.Errorf("RPC client is nil")
+	}
+	log.Info("Successfully created RPC connection wrapper")
+	return base.NewRPCConnWrapper(rpc, log), nil
+}
+
 func (g *GenericServiceClientBuilder) Init(ctx context.Context, log logr.Logger, c provider.InitConfig) (provider.ServiceClient, error) {
 	// Check for RPC mode first (same pattern as Java provider)
 	if c.RPC != nil {
-		return &GenericServiceClient{
+		log.Info("Initializing GenericServiceClient in RPC mode")
+		sc := &GenericServiceClient{
 			rpc:    c.RPC,
 			config: c,
 			log:    log,
-		}, nil
+		}
+
+		log.Info("Creating RPC connection wrapper for IDE communication")
+		// Create a real jsonrpc2.Connection using RPC client as transport
+		conn, err := createRPCConnection(ctx, c.RPC, log)
+		if err != nil {
+			log.Error(err, "Failed to create RPC connection wrapper")
+			return nil, fmt.Errorf("failed to create RPC connection: %w", err)
+		}
+
+		log.Info("Creating LSPServiceClientBase with RPC connection")
+		scBase := &base.LSPServiceClientBase{
+			Conn: conn,
+			Log:  log,
+			Ctx:  ctx,
+		}
+		sc.LSPServiceClientBase = scBase
+
+		log.Info("Creating LSP service client evaluator")
+		eval, err := base.NewLspServiceClientEvaluator[*GenericServiceClient](sc, g.GetGenericServiceClientCapabilities(log))
+		if err != nil {
+			log.Error(err, "Failed to create LSP service client evaluator")
+			return nil, fmt.Errorf("lsp service client evaluator error: %w", err)
+		}
+		sc.LSPServiceClientEvaluator = eval
+
+		log.Info("Successfully initialized GenericServiceClient in RPC mode")
+		return sc, nil
 	}
 
 	sc := &GenericServiceClient{}
@@ -186,84 +225,22 @@ func (sc *GenericServiceClient) EvaluateEcho(ctx context.Context, cap string, in
 	}, nil
 }
 
-func (sc *GenericServiceClient) isRPCMode() bool {
-	return sc.rpc != nil
-}
-
-// Evaluate method that handles both RPC and process modes
 func (sc *GenericServiceClient) Evaluate(ctx context.Context, cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
-	if sc.isRPCMode() {
-		return sc.evaluateRPC(ctx, cap, conditionInfo)
+	sc.log.Info("GenericServiceClient: evaluating capability", "capability", cap)
+	sc.log.V(2).Info("GenericServiceClient: condition info", "capability", cap, "conditionInfo", string(conditionInfo))
+	
+	result, err := sc.LSPServiceClientEvaluator.Evaluate(ctx, cap, conditionInfo)
+	if err != nil {
+		sc.log.Error(err, "GenericServiceClient: evaluation failed", "capability", cap)
+	} else {
+		sc.log.Info("GenericServiceClient: evaluation completed", "capability", cap, "matched", result.Matched, "incidents", len(result.Incidents))
 	}
-
-	// Process mode: use evaluator (existing behavior)
-	return sc.LSPServiceClientEvaluator.Evaluate(ctx, cap, conditionInfo)
+	
+	return result, err
 }
 
-// Stop method that handles both RPC and process modes
 func (sc *GenericServiceClient) Stop() {
-	if sc.isRPCMode() {
-		// RPC mode: just cleanup, don't kill external process
-		sc.log.Info("stopping RPC-based generic service client")
-		return
-	}
-
-	// Process mode: use base implementation (existing behavior)
 	if sc.LSPServiceClientBase != nil {
 		sc.LSPServiceClientBase.Stop()
 	}
-}
-
-// RPC-based evaluation (forwards to external RPC client like Java provider)
-func (sc *GenericServiceClient) evaluateRPC(ctx context.Context, cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
-	switch cap {
-	case "referenced":
-		return sc.evaluateReferencedRPC(ctx, conditionInfo)
-	case "echo":
-		// Reuse existing echo implementation
-		return sc.EvaluateEcho(ctx, cap, conditionInfo)
-	default:
-		return provider.ProviderEvaluateResponse{}, fmt.Errorf("capability '%s' not supported in RPC mode", cap)
-	}
-}
-
-// RPC-based referenced evaluation using standard LSP methods
-func (sc *GenericServiceClient) evaluateReferencedRPC(ctx context.Context, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
-	var cond base.ReferencedCondition
-	err := yaml.Unmarshal(conditionInfo, &cond)
-	if err != nil {
-		return provider.ProviderEvaluateResponse{}, fmt.Errorf("unable to get query info: %v", err)
-	}
-
-	// Use standard LSP workspace/symbol method (supported by most language servers)
-	params := map[string]interface{}{
-		"query": cond.Referenced.Pattern,
-	}
-
-	var symbols []interface{}
-	err = sc.rpc.Call(ctx, "workspace/symbol", params, &symbols)
-	if err != nil {
-		sc.log.Error(err, "failed to call workspace/symbol via RPC")
-		return provider.ProviderEvaluateResponse{}, err
-	}
-
-	// Convert symbols to incidents
-	incidents := []provider.IncidentContext{}
-	for _, symbol := range symbols {
-		if symbolMap, ok := symbol.(map[string]interface{}); ok {
-			incident := provider.IncidentContext{
-				Variables: map[string]interface{}{
-					"name":     symbolMap["name"],
-					"kind":     symbolMap["kind"],
-					"location": symbolMap["location"],
-				},
-			}
-			incidents = append(incidents, incident)
-		}
-	}
-
-	return provider.ProviderEvaluateResponse{
-		Matched:   len(incidents) > 0,
-		Incidents: incidents,
-	}, nil
 }
