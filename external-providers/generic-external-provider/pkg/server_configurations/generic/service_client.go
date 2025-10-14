@@ -92,6 +92,13 @@ func (g *GenericServiceClientBuilder) Init(ctx context.Context, log logr.Logger,
 			Conn: conn,
 			Log:  log,
 			Ctx:  ctx,
+			BaseConfig: base.LSPServiceClientConfig{
+				WorkspaceFolders: []string{c.Location},
+			},
+			// Set default server capabilities for RPC mode
+			ServerCapabilities: protocol.ServerCapabilities{
+				WorkspaceSymbolProvider: &protocol.WorkspaceSymbolOptions{},
+			},
 		}
 		sc.LSPServiceClientBase = scBase
 
