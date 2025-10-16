@@ -160,13 +160,13 @@ func (o *oldRpcClientWrapper) Notify(ctx context.Context, method string, params 
 }
 
 func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall {
-	
+
 	// For workspace/symbol calls, we need to preserve the exact JSON structure
 	// to avoid corrupting union types during marshaling/unmarshaling
 	if method == "workspace/symbol" {
 		return o.handleWorkspaceSymbolCall(ctx, method, params)
 	}
-	
+
 	// For other methods, use the original approach
 	result := []interface{}{}
 	err := o.rpc.Call(ctx, method, params, &result)
@@ -176,8 +176,7 @@ func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params in
 			method: method,
 		}
 	}
-	
-	
+
 	// Marshal the result back to JSON bytes
 	resultBytes, marshalErr := json.Marshal(result)
 	if marshalErr != nil {
@@ -186,7 +185,7 @@ func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params in
 			method: method,
 		}
 	}
-	
+
 	return &rpcConnReturnWrapper{
 		err:    nil,
 		result: resultBytes,
@@ -195,7 +194,7 @@ func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params in
 }
 
 func (o *oldRpcClientWrapper) handleWorkspaceSymbolCall(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall {
-	
+
 	// Use json.RawMessage to preserve the exact JSON structure returned by the LSP server
 	var result json.RawMessage
 	err := o.rpc.Call(ctx, method, params, &result)
@@ -205,7 +204,7 @@ func (o *oldRpcClientWrapper) handleWorkspaceSymbolCall(ctx context.Context, met
 			method: method,
 		}
 	}
-	
+
 	return &rpcConnReturnWrapper{
 		err:    nil,
 		result: []byte(result),
@@ -235,6 +234,7 @@ func NewRPCConnWrapper(rpc provider.RPCClient, log logr.Logger) RPCConn {
 type LSPServiceClientBase struct {
 	Ctx        context.Context
 	CancelFunc context.CancelFunc
+	Log        logr.Logger
 
 	BaseConfig LSPServiceClientConfig
 
@@ -303,6 +303,7 @@ func NewLSPServiceClientBase(
 
 	// Create the ctx, cancelFunc, and log
 	sc.Ctx, sc.CancelFunc = context.WithCancel(ctx)
+	sc.Log = log.WithValues("provider", sc.BaseConfig.LspServerName)
 
 	// launch the lsp command
 	sc.Dialer, err = NewCmdDialer(
@@ -334,6 +335,7 @@ func NewLSPServiceClientBase(
 		return nil, fmt.Errorf("initialize request error: %w, result: %s, initializeParams: %s, Dialer: %v", err, string(result), string(b), sc.Dialer)
 	}
 
+	fmt.Printf("%s\n", string(result))
 
 	initializeResult := protocol.InitializeResult{}
 	err = json.Unmarshal(result, &initializeResult)
@@ -348,8 +350,8 @@ func NewLSPServiceClientBase(
 	if err != nil {
 		return nil, fmt.Errorf("initialized notification error: %w", err)
 	}
-
-
+	fmt.Printf("provider connection initialized\n")
+	sc.Log.V(2).Info("provider connection initialized\n")
 	return &sc, nil
 }
 
@@ -407,7 +409,7 @@ func (sc *LSPServiceClientBase) GetDependenciesDAG(ctx context.Context) (map[uri
 }
 
 func (sc *LSPServiceClientBase) Handle(ctx context.Context, req *jsonrpc2.Request) (result interface{}, err error) {
-
+	// fmt.Printf("Base Handler!\n")
 	switch req.Method {
 	case "textDocument/publishDiagnostics":
 		var res protocol.PublishDiagnosticsParams
@@ -415,7 +417,7 @@ func (sc *LSPServiceClientBase) Handle(ctx context.Context, req *jsonrpc2.Reques
 		if err != nil {
 			return nil, err
 		}
-
+		// fmt.Printf("Fake wait.\n")
 		// time.Sleep(3 * time.Second)
 
 		sc.PublishDiagnosticsCache.Set(res.URI, res.Diagnostics)
@@ -456,9 +458,8 @@ func (sc *LSPServiceClientBase) GetAllDeclarations(ctx context.Context, workspac
 
 		err := sc.Conn.Call(ctx, "workspace/symbol", params).Await(ctx, &symbols)
 		if err != nil {
-		} else {
+			fmt.Printf("error: %v\n", err)
 		}
-	} else {
 	}
 
 	if regexErr != nil {
@@ -496,6 +497,7 @@ func (sc *LSPServiceClientBase) GetAllDeclarations(ctx context.Context, workspac
 
 		err := walkFiles(workspaceFolders)
 		if err != nil {
+			fmt.Printf("%s\n", err.Error())
 			return nil
 		}
 
@@ -518,6 +520,7 @@ func (sc *LSPServiceClientBase) GetAllDeclarations(ctx context.Context, workspac
 			err := sc.Conn.Call(ctx, "textDocument/definition", position).Await(ctx, &res)
 			// err := p.rpc.Call(ctx, "textDocument/declaration", position, &res)
 			if err != nil {
+				fmt.Printf("Error rpc: %v", err)
 			}
 
 			for _, r := range res {
@@ -554,9 +557,8 @@ func (sc *LSPServiceClientBase) GetAllReferences(ctx context.Context, location p
 	res := []protocol.Location{}
 	err := sc.Conn.Call(ctx, "textDocument/references", params).Await(ctx, &res)
 	if err != nil {
-	} else {
+		fmt.Printf("Error rpc: %v", err)
 	}
-
 	return res
 }
 

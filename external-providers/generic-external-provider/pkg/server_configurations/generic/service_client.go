@@ -66,7 +66,7 @@ func createRPCConnection(ctx context.Context, rpc provider.RPCClient, log logr.L
 }
 
 func (g *GenericServiceClientBuilder) Init(ctx context.Context, log logr.Logger, c provider.InitConfig) (provider.ServiceClient, error) {
-	// Check for RPC mode first (same pattern as Java provider)
+	// Check for RPC mode first
 	if c.RPC != nil {
 		sc := &GenericServiceClient{
 			rpc:    c.RPC,
@@ -133,6 +133,7 @@ func (g *GenericServiceClientBuilder) Init(ctx context.Context, log logr.Logger,
 	var InitializationOptions map[string]any
 	err = json.Unmarshal([]byte(sc.Config.LspServerInitializationOptions), &InitializationOptions)
 	if err != nil {
+		// fmt.Printf("Could not unmarshal into map[string]any: %s\n", sc.Config.LspServerInitializationOptions)
 		params.InitializationOptions = map[string]any{}
 	} else {
 		params.InitializationOptions = InitializationOptions
@@ -164,6 +165,7 @@ func (g *GenericServiceClientBuilder) GetGenericServiceClientCapabilities(log lo
 	r := openapi3.NewReflector()
 	refCap, err := provider.ToProviderCap(r, log, base.ReferencedCondition{}, "referenced")
 	if err != nil {
+		log.Error(err, "unable to get referenced cap")
 	} else {
 		caps = append(caps, base.LSPServiceClientCapability{
 			Capability: refCap,
@@ -172,6 +174,7 @@ func (g *GenericServiceClientBuilder) GetGenericServiceClientCapabilities(log lo
 	}
 	depCap, err := provider.ToProviderCap(r, log, base.NoOpCondition{}, "dependency")
 	if err != nil {
+		log.Error(err, "unable to get dependency cap")
 	} else {
 		caps = append(caps, base.LSPServiceClientCapability{
 			Capability: depCap,
@@ -180,6 +183,7 @@ func (g *GenericServiceClientBuilder) GetGenericServiceClientCapabilities(log lo
 	}
 	echoCap, err := provider.ToProviderCap(r, log, echoCondition{}, "echo")
 	if err != nil {
+		log.Error(err, "unable to get echo cap")
 	} else {
 		caps = append(caps, base.LSPServiceClientCapability{
 			Capability: echoCap,
@@ -218,12 +222,12 @@ func (sc *GenericServiceClient) EvaluateEcho(ctx context.Context, cap string, in
 }
 
 func (sc *GenericServiceClient) Evaluate(ctx context.Context, cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
-	
+
 	result, err := sc.LSPServiceClientEvaluator.Evaluate(ctx, cap, conditionInfo)
 	if err != nil {
 	} else {
 	}
-	
+
 	return result, err
 }
 

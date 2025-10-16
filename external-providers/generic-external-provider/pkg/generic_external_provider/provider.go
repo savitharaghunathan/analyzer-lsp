@@ -72,7 +72,6 @@ func (p *genericProvider) Init(ctx context.Context, log logr.Logger, c provider.
 
 	fmt.Fprintf(os.Stderr, "started generic provider init")
 
-	// Check if RPC client is provided (like Java provider does)
 	if c.RPC != nil {
 		log.Info("using RPC client for generic provider")
 		// Use the GenericServiceClientBuilder which already handles RPC mode
