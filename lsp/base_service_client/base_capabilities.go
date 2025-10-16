@@ -40,32 +40,24 @@ type ReferencedCondition struct {
 // references.
 func EvaluateReferenced[T base](t T, ctx ctx, cap string, info []byte) (resp, error) {
 	sc := t.GetLSPServiceClientBase()
-	sc.Log.Info("EvaluateReferenced: starting evaluation", "capability", cap)
 
 	var cond ReferencedCondition
 	err := yaml.Unmarshal(info, &cond)
 	if err != nil {
-		sc.Log.Error(err, "EvaluateReferenced: failed to unmarshal condition")
 		return resp{}, fmt.Errorf("error unmarshaling query info")
 	}
 
 	query := cond.Referenced.Pattern
 	if query == "" {
-		sc.Log.Error(fmt.Errorf("empty query pattern"), "EvaluateReferenced: no query pattern provided")
 		return resp{}, fmt.Errorf("unable to get query info")
 	}
 
-	sc.Log.Info("EvaluateReferenced: calling GetAllDeclarations", "query", query, "workspaceFolders", sc.BaseConfig.WorkspaceFolders)
 	symbols := sc.GetAllDeclarations(ctx, sc.BaseConfig.WorkspaceFolders, query)
-	sc.Log.Info("EvaluateReferenced: GetAllDeclarations returned", "symbolCount", len(symbols))
 
 	incidents := []provider.IncidentContext{}
 	incidentsMap := make(map[string]provider.IncidentContext) // Remove duplicates
 
-	sc.Log.Info("EvaluateReferenced: starting to process symbols for references", "symbolCount", len(symbols))
-	for i, s := range symbols {
-		sc.Log.Info("EvaluateReferenced: processing symbol", "symbolIndex", i, "symbolName", s.Name)
-		sc.Log.V(2).Info("EvaluateReferenced: symbol location details", "symbolIndex", i, "locationType", fmt.Sprintf("%T", s.Location.Value), "locationValue", s.Location.Value)
+	for _, s := range symbols {
 		
 		// Handle the union type properly
 		var location protocol.Location
@@ -75,13 +67,10 @@ func EvaluateReferenced[T base](t T, ctx ctx, cap string, info []byte) (resp, er
 		case *protocol.Location:
 			location = *v
 		default:
-			sc.Log.Error(fmt.Errorf("unexpected location type: %T", v), "EvaluateReferenced: skipping symbol due to location type", "symbolName", s.Name)
 			continue
 		}
 		
-		sc.Log.Info("EvaluateReferenced: getting references for symbol", "symbolIndex", i, "symbolName", s.Name, "symbolURI", location.URI)
 		references := sc.GetAllReferences(ctx, location)
-		sc.Log.Info("EvaluateReferenced: got references for symbol", "symbolIndex", i, "symbolName", s.Name, "referenceCount", len(references))
 
 		breakEarly := false
 		for _, ref := range references {

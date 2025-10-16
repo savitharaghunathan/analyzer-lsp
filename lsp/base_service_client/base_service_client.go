@@ -125,7 +125,6 @@ type RPCConnReturn interface {
 type rpcConnReturnWrapper struct {
 	err    error
 	result []byte
-	log    logr.Logger
 	method string
 }
 
@@ -138,39 +137,29 @@ func (r *rpcConnReturnWrapper) IsReady() bool {
 }
 
 func (r *rpcConnReturnWrapper) Await(ctx context.Context, result interface{}) error {
-	r.log.V(2).Info("RPC wrapper: awaiting result", "method", r.method, "hasError", r.err != nil)
 	if r.err != nil {
-		r.log.Error(r.err, "RPC wrapper: returning error from await", "method", r.method)
 		return r.err
 	}
-	r.log.V(2).Info("RPC wrapper: unmarshaling result", "method", r.method, "resultSize", len(r.result), "targetType", fmt.Sprintf("%T", result))
 	err := json.Unmarshal(r.result, result)
 	if err != nil {
-		r.log.Error(err, "RPC wrapper: failed to unmarshal result", "method", r.method)
 		return err
 	}
-	r.log.V(2).Info("RPC wrapper: successfully unmarshaled result", "method", r.method)
 	return nil
 }
 
 type oldRpcClientWrapper struct {
 	rpc provider.RPCClient
-	log logr.Logger
 }
 
 func (o *oldRpcClientWrapper) Notify(ctx context.Context, method string, params interface{}) (err error) {
-	o.log.Info("RPC wrapper: sending notification", "method", method)
 	err = o.rpc.Notify(ctx, method, params)
 	if err != nil {
-		o.log.Error(err, "RPC wrapper: notification failed", "method", method)
 	} else {
-		o.log.V(2).Info("RPC wrapper: notification completed successfully", "method", method)
 	}
 	return err
 }
 
 func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall {
-	o.log.Info("RPC wrapper: sending call", "method", method)
 	
 	// For workspace/symbol calls, we need to preserve the exact JSON structure
 	// to avoid corrupting union types during marshaling/unmarshaling
@@ -182,56 +171,44 @@ func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params in
 	result := []interface{}{}
 	err := o.rpc.Call(ctx, method, params, &result)
 	if err != nil {
-		o.log.Error(err, "RPC wrapper: call failed", "method", method)
 		return &rpcConnReturnWrapper{
 			err:    err,
-			log:    o.log,
 			method: method,
 		}
 	}
 	
-	o.log.V(2).Info("RPC wrapper: call completed, marshaling result", "method", method, "resultType", fmt.Sprintf("%T", result))
 	
 	// Marshal the result back to JSON bytes
 	resultBytes, marshalErr := json.Marshal(result)
 	if marshalErr != nil {
-		o.log.Error(marshalErr, "RPC wrapper: failed to marshal result", "method", method)
 		return &rpcConnReturnWrapper{
 			err:    marshalErr,
-			log:    o.log,
 			method: method,
 		}
 	}
 	
-	o.log.V(2).Info("RPC wrapper: call successful", "method", method, "resultSize", len(resultBytes))
 	return &rpcConnReturnWrapper{
 		err:    nil,
 		result: resultBytes,
-		log:    o.log,
 		method: method,
 	}
 }
 
 func (o *oldRpcClientWrapper) handleWorkspaceSymbolCall(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall {
-	o.log.V(2).Info("RPC wrapper: handling workspace/symbol call with special JSON preservation")
 	
 	// Use json.RawMessage to preserve the exact JSON structure returned by the LSP server
 	var result json.RawMessage
 	err := o.rpc.Call(ctx, method, params, &result)
 	if err != nil {
-		o.log.Error(err, "RPC wrapper: workspace/symbol call failed", "method", method)
 		return &rpcConnReturnWrapper{
 			err:    err,
-			log:    o.log,
 			method: method,
 		}
 	}
 	
-	o.log.V(2).Info("RPC wrapper: workspace/symbol call successful, preserving raw JSON", "method", method, "resultSize", len(result))
 	return &rpcConnReturnWrapper{
 		err:    nil,
 		result: []byte(result),
-		log:    o.log,
 		method: method,
 	}
 }
@@ -239,14 +216,12 @@ func (o *oldRpcClientWrapper) handleWorkspaceSymbolCall(ctx context.Context, met
 func (o *oldRpcClientWrapper) Close() error {
 	// The old provider.RPCClient interface doesn't have a Close method
 	// so we'll just return nil for now
-	o.log.Info("RPC wrapper: close requested (no-op for old RPC client)")
 	return nil
 }
 
 // NewRPCConnWrapper creates an RPCConn wrapper around an old provider.RPCClient
 func NewRPCConnWrapper(rpc provider.RPCClient, log logr.Logger) RPCConn {
-	log.Info("Creating RPC connection wrapper for old provider.RPCClient")
-	return &oldRpcClientWrapper{rpc: rpc, log: log}
+	return &oldRpcClientWrapper{rpc: rpc}
 }
 
 // Almost everything implemented to satisfy the protocol.ServiceClient
@@ -260,7 +235,6 @@ func NewRPCConnWrapper(rpc provider.RPCClient, log logr.Logger) RPCConn {
 type LSPServiceClientBase struct {
 	Ctx        context.Context
 	CancelFunc context.CancelFunc
-	Log        logr.Logger
 
 	BaseConfig LSPServiceClientConfig
 
@@ -329,7 +303,6 @@ func NewLSPServiceClientBase(
 
 	// Create the ctx, cancelFunc, and log
 	sc.Ctx, sc.CancelFunc = context.WithCancel(ctx)
-	sc.Log = log.WithValues("provider", sc.BaseConfig.LspServerName)
 
 	// launch the lsp command
 	sc.Dialer, err = NewCmdDialer(
@@ -361,7 +334,6 @@ func NewLSPServiceClientBase(
 		return nil, fmt.Errorf("initialize request error: %w, result: %s, initializeParams: %s, Dialer: %v", err, string(result), string(b), sc.Dialer)
 	}
 
-	fmt.Printf("%s\n", string(result))
 
 	initializeResult := protocol.InitializeResult{}
 	err = json.Unmarshal(result, &initializeResult)
@@ -377,8 +349,6 @@ func NewLSPServiceClientBase(
 		return nil, fmt.Errorf("initialized notification error: %w", err)
 	}
 
-	fmt.Printf("provider connection initialized\n")
-	sc.Log.V(2).Info("provider connection initialized\n")
 
 	return &sc, nil
 }
@@ -437,7 +407,6 @@ func (sc *LSPServiceClientBase) GetDependenciesDAG(ctx context.Context) (map[uri
 }
 
 func (sc *LSPServiceClientBase) Handle(ctx context.Context, req *jsonrpc2.Request) (result interface{}, err error) {
-	// fmt.Printf("Base Handler!\n")
 
 	switch req.Method {
 	case "textDocument/publishDiagnostics":
@@ -447,7 +416,6 @@ func (sc *LSPServiceClientBase) Handle(ctx context.Context, req *jsonrpc2.Reques
 			return nil, err
 		}
 
-		// fmt.Printf("Fake wait.\n")
 		// time.Sleep(3 * time.Second)
 
 		sc.PublishDiagnosticsCache.Set(res.URI, res.Diagnostics)
@@ -474,31 +442,23 @@ func (sc *LSPServiceClientBase) GetAllDeclarations(ctx context.Context, workspac
 	// TODO(jsussman) Should we change protocol.WorkspaceSymbol to
 	// protocol.SymbolInformation?
 
-	sc.Log.Info("GetAllDeclarations: starting", "query", query, "workspaceFolders", workspaceFolders)
 	var symbols []protocol.WorkspaceSymbol
 
 	regex, regexErr := regexp.Compile(query)
-	sc.Log.Info("GetAllDeclarations: regex compilation", "query", query, "regexErr", regexErr)
 
 	// Client may or may not support the "workspace/symbol" method, so we must
 	// check before calling.
-	sc.Log.Info("GetAllDeclarations: checking server capabilities", "supportsWorkspaceSymbol", sc.ServerCapabilities.Supports("workspace/symbol"))
 
 	if sc.ServerCapabilities.Supports("workspace/symbol") {
 		params := protocol.WorkspaceSymbolParams{
 			Query: query,
 		}
 
-		sc.Log.Info("GetAllDeclarations: making workspace/symbol call", "params", params)
 		err := sc.Conn.Call(ctx, "workspace/symbol", params).Await(ctx, &symbols)
 		if err != nil {
-			sc.Log.Error(err, "GetAllDeclarations: workspace/symbol call failed")
-			fmt.Printf("error: %v\n", err)
 		} else {
-			sc.Log.Info("GetAllDeclarations: workspace/symbol call succeeded", "symbolCount", len(symbols))
 		}
 	} else {
-		sc.Log.Info("GetAllDeclarations: workspace/symbol not supported, skipping LSP call")
 	}
 
 	if regexErr != nil {
@@ -536,7 +496,6 @@ func (sc *LSPServiceClientBase) GetAllDeclarations(ctx context.Context, workspac
 
 		err := walkFiles(workspaceFolders)
 		if err != nil {
-			fmt.Printf("%s\n", err.Error())
 			return nil
 		}
 
@@ -559,7 +518,6 @@ func (sc *LSPServiceClientBase) GetAllDeclarations(ctx context.Context, workspac
 			err := sc.Conn.Call(ctx, "textDocument/definition", position).Await(ctx, &res)
 			// err := p.rpc.Call(ctx, "textDocument/declaration", position, &res)
 			if err != nil {
-				fmt.Printf("Error rpc: %v", err)
 			}
 
 			for _, r := range res {
@@ -581,7 +539,6 @@ func (sc *LSPServiceClientBase) GetAllDeclarations(ctx context.Context, workspac
 }
 
 func (sc *LSPServiceClientBase) GetAllReferences(ctx context.Context, location protocol.Location) []protocol.Location {
-	sc.Log.Info("GetAllReferences: starting", "URI", location.URI, "position", location.Range.Start)
 	params := &protocol.ReferenceParams{
 		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
 			TextDocument: protocol.TextDocumentIdentifier{
@@ -594,14 +551,10 @@ func (sc *LSPServiceClientBase) GetAllReferences(ctx context.Context, location p
 		},
 	}
 
-	sc.Log.Info("GetAllReferences: making textDocument/references call", "params", params)
 	res := []protocol.Location{}
 	err := sc.Conn.Call(ctx, "textDocument/references", params).Await(ctx, &res)
 	if err != nil {
-		sc.Log.Error(err, "GetAllReferences: textDocument/references call failed")
-		fmt.Printf("Error rpc: %v", err)
 	} else {
-		sc.Log.Info("GetAllReferences: textDocument/references call succeeded", "referenceCount", len(res))
 	}
 
 	return res
