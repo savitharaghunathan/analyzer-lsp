@@ -53,44 +53,34 @@ type GenericServiceClient struct {
 	// RPC mode fields (same as Java provider)
 	rpc    provider.RPCClient
 	config provider.InitConfig
-	log    logr.Logger
 }
 
 type GenericServiceClientBuilder struct{}
 
 // createRPCConnection wraps an RPC client to create a proper jsonrpc2 connection
 func createRPCConnection(ctx context.Context, rpc provider.RPCClient, log logr.Logger) (base.RPCConn, error) {
-	log.Info("Creating RPC connection wrapper")
 	if rpc == nil {
-		log.Error(fmt.Errorf("RPC client is nil"), "Failed to create RPC connection")
 		return nil, fmt.Errorf("RPC client is nil")
 	}
-	log.Info("Successfully created RPC connection wrapper")
 	return base.NewRPCConnWrapper(rpc, log), nil
 }
 
 func (g *GenericServiceClientBuilder) Init(ctx context.Context, log logr.Logger, c provider.InitConfig) (provider.ServiceClient, error) {
 	// Check for RPC mode first (same pattern as Java provider)
 	if c.RPC != nil {
-		log.Info("Initializing GenericServiceClient in RPC mode")
 		sc := &GenericServiceClient{
 			rpc:    c.RPC,
 			config: c,
-			log:    log,
 		}
 
-		log.Info("Creating RPC connection wrapper for IDE communication")
 		// Create a real jsonrpc2.Connection using RPC client as transport
 		conn, err := createRPCConnection(ctx, c.RPC, log)
 		if err != nil {
-			log.Error(err, "Failed to create RPC connection wrapper")
 			return nil, fmt.Errorf("failed to create RPC connection: %w", err)
 		}
 
-		log.Info("Creating LSPServiceClientBase with RPC connection")
 		scBase := &base.LSPServiceClientBase{
 			Conn: conn,
-			Log:  log,
 			Ctx:  ctx,
 			BaseConfig: base.LSPServiceClientConfig{
 				WorkspaceFolders: []string{c.Location},
@@ -104,15 +94,12 @@ func (g *GenericServiceClientBuilder) Init(ctx context.Context, log logr.Logger,
 		}
 		sc.LSPServiceClientBase = scBase
 
-		log.Info("Creating LSP service client evaluator")
 		eval, err := base.NewLspServiceClientEvaluator[*GenericServiceClient](sc, g.GetGenericServiceClientCapabilities(log))
 		if err != nil {
-			log.Error(err, "Failed to create LSP service client evaluator")
 			return nil, fmt.Errorf("lsp service client evaluator error: %w", err)
 		}
 		sc.LSPServiceClientEvaluator = eval
 
-		log.Info("Successfully initialized GenericServiceClient in RPC mode")
 		return sc, nil
 	}
 
@@ -146,7 +133,6 @@ func (g *GenericServiceClientBuilder) Init(ctx context.Context, log logr.Logger,
 	var InitializationOptions map[string]any
 	err = json.Unmarshal([]byte(sc.Config.LspServerInitializationOptions), &InitializationOptions)
 	if err != nil {
-		// fmt.Printf("Could not unmarshal into map[string]any: %s\n", sc.Config.LspServerInitializationOptions)
 		params.InitializationOptions = map[string]any{}
 	} else {
 		params.InitializationOptions = InitializationOptions
@@ -178,7 +164,6 @@ func (g *GenericServiceClientBuilder) GetGenericServiceClientCapabilities(log lo
 	r := openapi3.NewReflector()
 	refCap, err := provider.ToProviderCap(r, log, base.ReferencedCondition{}, "referenced")
 	if err != nil {
-		log.Error(err, "unable to get referenced cap")
 	} else {
 		caps = append(caps, base.LSPServiceClientCapability{
 			Capability: refCap,
@@ -187,7 +172,6 @@ func (g *GenericServiceClientBuilder) GetGenericServiceClientCapabilities(log lo
 	}
 	depCap, err := provider.ToProviderCap(r, log, base.NoOpCondition{}, "dependency")
 	if err != nil {
-		log.Error(err, "unable to get referenced cap")
 	} else {
 		caps = append(caps, base.LSPServiceClientCapability{
 			Capability: depCap,
@@ -196,7 +180,6 @@ func (g *GenericServiceClientBuilder) GetGenericServiceClientCapabilities(log lo
 	}
 	echoCap, err := provider.ToProviderCap(r, log, echoCondition{}, "echo")
 	if err != nil {
-		log.Error(err, "unable to get referenced cap")
 	} else {
 		caps = append(caps, base.LSPServiceClientCapability{
 			Capability: echoCap,
@@ -235,14 +218,10 @@ func (sc *GenericServiceClient) EvaluateEcho(ctx context.Context, cap string, in
 }
 
 func (sc *GenericServiceClient) Evaluate(ctx context.Context, cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
-	sc.log.Info("GenericServiceClient: evaluating capability", "capability", cap)
-	sc.log.V(2).Info("GenericServiceClient: condition info", "capability", cap, "conditionInfo", string(conditionInfo))
 	
 	result, err := sc.LSPServiceClientEvaluator.Evaluate(ctx, cap, conditionInfo)
 	if err != nil {
-		sc.log.Error(err, "GenericServiceClient: evaluation failed", "capability", cap)
 	} else {
-		sc.log.Info("GenericServiceClient: evaluation completed", "capability", cap, "matched", result.Matched, "incidents", len(result.Incidents))
 	}
 	
 	return result, err
