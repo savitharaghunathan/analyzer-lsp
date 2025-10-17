@@ -160,42 +160,7 @@ func (o *oldRpcClientWrapper) Notify(ctx context.Context, method string, params 
 }
 
 func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall {
-
-	// For workspace/symbol calls, we need to preserve the exact JSON structure
-	// to avoid corrupting union types during marshaling/unmarshaling
-	if method == "workspace/symbol" {
-		return o.handleWorkspaceSymbolCall(ctx, method, params)
-	}
-
-	// For other methods, use the original approach
-	result := []interface{}{}
-	err := o.rpc.Call(ctx, method, params, &result)
-	if err != nil {
-		return &rpcConnReturnWrapper{
-			err:    err,
-			method: method,
-		}
-	}
-
-	// Marshal the result back to JSON bytes
-	resultBytes, marshalErr := json.Marshal(result)
-	if marshalErr != nil {
-		return &rpcConnReturnWrapper{
-			err:    marshalErr,
-			method: method,
-		}
-	}
-
-	return &rpcConnReturnWrapper{
-		err:    nil,
-		result: resultBytes,
-		method: method,
-	}
-}
-
-func (o *oldRpcClientWrapper) handleWorkspaceSymbolCall(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall {
-
-	// Use json.RawMessage to preserve the exact JSON structure returned by the LSP server
+	// Use json.RawMessage for all methods to avoid double JSON conversion
 	var result json.RawMessage
 	err := o.rpc.Call(ctx, method, params, &result)
 	if err != nil {
@@ -211,6 +176,7 @@ func (o *oldRpcClientWrapper) handleWorkspaceSymbolCall(ctx context.Context, met
 		method: method,
 	}
 }
+
 
 func (o *oldRpcClientWrapper) Close() error {
 	// The old provider.RPCClient interface doesn't have a Close method
