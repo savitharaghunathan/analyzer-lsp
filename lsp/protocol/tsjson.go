@@ -10,9 +10,10 @@ package protocol
 // https://github.com/microsoft/vscode-languageserver-node/blob/main/protocol/metaModel.json
 // LSP metaData.version = 3.17.0.
 
-import "encoding/json"
-
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // UnmarshalError indicates that a JSON value did not conform to
 // one of the expected cases of an LSP union type.
@@ -2149,67 +2150,4 @@ func (t *Or_textDocument_declaration) UnmarshalJSON(x []byte) error {
 		return nil
 	}
 	return &UnmarshalError{"unmarshal failed to match one of [Declaration []DeclarationLink]"}
-}
-
-// Custom UnmarshalJSON for Range to handle both LSP-compliant object format
-// and gopls non-compliant array format
-func (r *Range) UnmarshalJSON(data []byte) error {
-	// First try standard LSP format: {"start": {...}, "end": {...}}
-	type StandardRange Range
-	var stdRange StandardRange
-	if err := json.Unmarshal(data, &stdRange); err == nil {
-		*r = Range(stdRange)
-		return nil
-	}
-	
-	// Fall back to gopls array format: [{"line": ..., "character": ...}, {"line": ..., "character": ...}]
-	var positions []Position
-	if err := json.Unmarshal(data, &positions); err != nil {
-		return err
-	}
-	
-	if len(positions) != 2 {
-		return fmt.Errorf("expected exactly 2 positions in range array, got %d", len(positions))
-	}
-	
-	r.Start = positions[0]
-	r.End = positions[1]
-	return nil
-}
-
-// Custom UnmarshalJSON for Location to handle both LSP-compliant string URI format
-// and IDE object URI format
-func (l *Location) UnmarshalJSON(data []byte) error {
-	// Define a temporary struct to handle the standard case
-	type StandardLocation struct {
-		URI   json.RawMessage `json:"uri"`
-		Range Range           `json:"range"`
-	}
-	
-	var stdLoc StandardLocation
-	if err := json.Unmarshal(data, &stdLoc); err != nil {
-		return err
-	}
-	
-	// Handle URI field - try string format first, then object format
-	var uriStr string
-	if err := json.Unmarshal(stdLoc.URI, &uriStr); err == nil {
-		// Standard LSP string format: "file://..."
-		l.URI = DocumentURI(uriStr)
-	} else {
-		// IDE object format: {"$mid": 1, "path": "...", "scheme": "file"}
-		var uriObj struct {
-			Scheme string `json:"scheme"`
-			Path   string `json:"path"`
-		}
-		if err := json.Unmarshal(stdLoc.URI, &uriObj); err != nil {
-			return fmt.Errorf("URI field is neither string nor valid object format: %v", err)
-		}
-		// Convert object format to standard URI string
-		l.URI = DocumentURI(fmt.Sprintf("%s://%s", uriObj.Scheme, uriObj.Path))
-	}
-	
-	// Set the range
-	l.Range = stdLoc.Range
-	return nil
 }
