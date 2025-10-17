@@ -221,15 +221,6 @@ func (sc *GenericServiceClient) EvaluateEcho(ctx context.Context, cap string, in
 	}, nil
 }
 
-func (sc *GenericServiceClient) Evaluate(ctx context.Context, cap string, conditionInfo []byte) (provider.ProviderEvaluateResponse, error) {
-
-	result, err := sc.LSPServiceClientEvaluator.Evaluate(ctx, cap, conditionInfo)
-	if err != nil {
-	} else {
-	}
-
-	return result, err
-}
 
 func (sc *GenericServiceClient) Stop() {
 	if sc.LSPServiceClientBase != nil {
