@@ -58,19 +58,7 @@ func EvaluateReferenced[T base](t T, ctx ctx, cap string, info []byte) (resp, er
 	incidentsMap := make(map[string]provider.IncidentContext) // Remove duplicates
 
 	for _, s := range symbols {
-		
-		// Handle the union type properly
-		var location protocol.Location
-		switch v := s.Location.Value.(type) {
-		case protocol.Location:
-			location = v
-		case *protocol.Location:
-			location = *v
-		default:
-			continue
-		}
-		
-		references := sc.GetAllReferences(ctx, location)
+		references := sc.GetAllReferences(ctx, s.Location.Value.(protocol.Location))
 
 		breakEarly := false
 		for _, ref := range references {
