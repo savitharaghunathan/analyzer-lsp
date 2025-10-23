@@ -386,7 +386,13 @@ func (sc *LSPServiceClientBase) GetDependencies(ctx context.Context) (map[uri.UR
 	}
 	// Expects dependency provider to output provider.Dep structs to stdout
 	cmd := exec.Command(cmdStr)
-	cmd.Dir = sc.BaseConfig.WorkspaceFolders[0][7:]
+	
+	// Handle workspace folder path - strip file:// prefix if present, otherwise use as-is
+	workspaceDir := sc.BaseConfig.WorkspaceFolders[0]
+	if strings.HasPrefix(workspaceDir, "file://") {
+		workspaceDir = workspaceDir[7:] // Strip "file://" prefix
+	}
+	cmd.Dir = workspaceDir
 	dataR, err := cmd.Output()
 	if err != nil {
 		return nil, err
