@@ -49,11 +49,84 @@ type GenericServiceClient struct {
 	*base.LSPServiceClientEvaluator[*GenericServiceClient]
 
 	Config GenericServiceClientConfig
+
+	// RPC mode fields (same as Java provider)
+	rpc    provider.RPCClient
+	config provider.InitConfig
 }
 
 type GenericServiceClientBuilder struct{}
 
+// createRPCConnection wraps an RPC client to create a proper jsonrpc2 connection
+func createRPCConnection(ctx context.Context, rpc provider.RPCClient, log logr.Logger) (base.RPCConn, error) {
+	if rpc == nil {
+		return nil, fmt.Errorf("RPC client is nil")
+	}
+	return base.NewRPCConnWrapper(rpc, log), nil
+}
+
 func (g *GenericServiceClientBuilder) Init(ctx context.Context, log logr.Logger, c provider.InitConfig) (provider.ServiceClient, error) {
+	// Check for RPC mode first
+	if c.RPC != nil {
+		sc := &GenericServiceClient{
+			rpc:    c.RPC,
+			config: c,
+		}
+
+		// Create a real jsonrpc2.Connection using RPC client as transport
+		conn, err := createRPCConnection(ctx, c.RPC, log)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create RPC connection: %w", err)
+		}
+
+		// Extract dependencyProviderPath from ProviderSpecificConfig
+		var dependencyProviderPath string
+		if c.ProviderSpecificConfig != nil {
+			log.Info("RPC mode: checking ProviderSpecificConfig for dependencyProviderPath", "config", c.ProviderSpecificConfig)
+			if depPath, exists := c.ProviderSpecificConfig["dependencyProviderPath"]; exists {
+				log.Info("RPC mode: found dependencyProviderPath in config", "value", depPath)
+				if depPathStr, ok := depPath.(string); ok {
+					dependencyProviderPath = depPathStr
+					log.Info("RPC mode: successfully extracted dependencyProviderPath", "path", dependencyProviderPath)
+				} else {
+					log.Info("RPC mode: dependencyProviderPath is not a string", "type", fmt.Sprintf("%T", depPath))
+				}
+			} else {
+				log.Info("RPC mode: dependencyProviderPath not found in ProviderSpecificConfig")
+			}
+		} else {
+			log.Info("RPC mode: ProviderSpecificConfig is nil")
+		}
+
+		scBase := &base.LSPServiceClientBase{
+			Conn: conn,
+			Ctx:  ctx,
+			BaseConfig: base.LSPServiceClientConfig{
+				WorkspaceFolders:       []string{c.Location},
+				DependencyProviderPath: dependencyProviderPath,
+			},
+			// Set default server capabilities for RPC mode
+			ServerCapabilities: protocol.ServerCapabilities{
+				WorkspaceSymbolProvider: &protocol.Or_ServerCapabilities_workspaceSymbolProvider{
+					Value: true,
+				},
+			},
+		}
+		sc.LSPServiceClientBase = scBase
+
+		log.Info("RPC mode: BaseConfig initialized", 
+			"WorkspaceFolders", scBase.BaseConfig.WorkspaceFolders, 
+			"DependencyProviderPath", scBase.BaseConfig.DependencyProviderPath)
+
+		eval, err := base.NewLspServiceClientEvaluator[*GenericServiceClient](sc, g.GetGenericServiceClientCapabilities(log))
+		if err != nil {
+			return nil, fmt.Errorf("lsp service client evaluator error: %w", err)
+		}
+		sc.LSPServiceClientEvaluator = eval
+
+		return sc, nil
+	}
+
 	sc := &GenericServiceClient{}
 
 	// Unmarshal the config
@@ -125,7 +198,7 @@ func (g *GenericServiceClientBuilder) GetGenericServiceClientCapabilities(log lo
 	}
 	depCap, err := provider.ToProviderCap(r, log, base.NoOpCondition{}, "dependency")
 	if err != nil {
-		log.Error(err, "unable to get referenced cap")
+		log.Error(err, "unable to get dependency cap")
 	} else {
 		caps = append(caps, base.LSPServiceClientCapability{
 			Capability: depCap,
@@ -134,7 +207,7 @@ func (g *GenericServiceClientBuilder) GetGenericServiceClientCapabilities(log lo
 	}
 	echoCap, err := provider.ToProviderCap(r, log, echoCondition{}, "echo")
 	if err != nil {
-		log.Error(err, "unable to get referenced cap")
+		log.Error(err, "unable to get echo cap")
 	} else {
 		caps = append(caps, base.LSPServiceClientCapability{
 			Capability: echoCap,
@@ -170,4 +243,11 @@ func (sc *GenericServiceClient) EvaluateEcho(ctx context.Context, cap string, in
 			},
 		},
 	}, nil
+}
+
+
+func (sc *GenericServiceClient) Stop() {
+	if sc.LSPServiceClientBase != nil {
+		sc.LSPServiceClientBase.Stop()
+	}
 }

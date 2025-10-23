@@ -10,9 +10,10 @@ package protocol
 // https://github.com/microsoft/vscode-languageserver-node/blob/main/protocol/metaModel.json
 // LSP metaData.version = 3.17.0.
 
-import "encoding/json"
-
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // UnmarshalError indicates that a JSON value did not conform to
 // one of the expected cases of an LSP union type.
@@ -2150,3 +2151,4 @@ func (t *Or_textDocument_declaration) UnmarshalJSON(x []byte) error {
 	}
 	return &UnmarshalError{"unmarshal failed to match one of [Declaration []DeclarationLink]"}
 }
+

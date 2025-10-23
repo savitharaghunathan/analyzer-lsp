@@ -110,6 +110,84 @@ type HasLSPServiceClientBase interface {
 	GetLSPServiceClientBase() *LSPServiceClientBase
 }
 
+type RPCConn interface {
+	Notify(ctx context.Context, method string, params interface{}) (err error)
+	Call(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall
+	Close() error
+}
+
+type RPCConnReturn interface {
+	ID() jsonrpc2.ID
+	IsReady() bool
+	Await(ctx context.Context, result interface{}) error
+}
+
+type rpcConnReturnWrapper struct {
+	err    error
+	result []byte
+	method string
+}
+
+func (r *rpcConnReturnWrapper) ID() jsonrpc2.ID {
+	return jsonrpc2.StringID("unimplemented")
+}
+
+func (r *rpcConnReturnWrapper) IsReady() bool {
+	return true
+}
+
+func (r *rpcConnReturnWrapper) Await(ctx context.Context, result interface{}) error {
+	if r.err != nil {
+		return r.err
+	}
+	err := json.Unmarshal(r.result, result)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+type oldRpcClientWrapper struct {
+	rpc provider.RPCClient
+}
+
+func (o *oldRpcClientWrapper) Notify(ctx context.Context, method string, params interface{}) (err error) {
+	err = o.rpc.Notify(ctx, method, params)
+	if err != nil {
+	} else {
+	}
+	return err
+}
+
+func (o *oldRpcClientWrapper) Call(ctx context.Context, method string, params interface{}) jsonrpc2.AsyncCall {
+	// Use json.RawMessage to preserve the exact JSON structure returned by the LSP server
+	var result json.RawMessage
+	err := o.rpc.Call(ctx, method, params, &result)
+	if err != nil {
+		return &rpcConnReturnWrapper{
+			err:    err,
+			method: method,
+		}
+	}
+
+	return &rpcConnReturnWrapper{
+		err:    nil,
+		result: []byte(result),
+		method: method,
+	}
+}
+
+func (o *oldRpcClientWrapper) Close() error {
+	// The old provider.RPCClient interface doesn't have a Close method
+	// so we'll just return nil for now
+	return nil
+}
+
+// NewRPCConnWrapper creates an RPCConn wrapper around an old provider.RPCClient
+func NewRPCConnWrapper(rpc provider.RPCClient, log logr.Logger) RPCConn {
+	return &oldRpcClientWrapper{rpc: rpc}
+}
+
 // Almost everything implemented to satisfy the protocol.ServiceClient
 // interface. The only thing that's not is `Evaluate`, intentionally.
 //
@@ -126,7 +204,7 @@ type LSPServiceClientBase struct {
 	BaseConfig LSPServiceClientConfig
 
 	Dialer *CmdDialer
-	Conn   *jsonrpc2.Connection
+	Conn   RPCConn
 
 	// Will call this handler's Handle function first. If it returns an
 	// ErrMethodNotFound or ErrNotHandled we use the LSPServiceClientBase's Handle
@@ -237,10 +315,8 @@ func NewLSPServiceClientBase(
 	if err != nil {
 		return nil, fmt.Errorf("initialized notification error: %w", err)
 	}
-
 	fmt.Printf("provider connection initialized\n")
 	sc.Log.V(2).Info("provider connection initialized\n")
-
 	return &sc, nil
 }
 
@@ -275,7 +351,13 @@ func (sc *LSPServiceClientBase) GetDependencies(ctx context.Context) (map[uri.UR
 	}
 	// Expects dependency provider to output provider.Dep structs to stdout
 	cmd := exec.Command(cmdStr)
-	cmd.Dir = sc.BaseConfig.WorkspaceFolders[0][7:]
+
+	// Handle workspace folder path - strip file:// prefix if present, otherwise use as-is
+	workspaceDir := sc.BaseConfig.WorkspaceFolders[0]
+	if strings.HasPrefix(workspaceDir, "file://") {
+		workspaceDir = workspaceDir[7:] // Strip "file://" prefix
+	}
+	cmd.Dir = workspaceDir
 	dataR, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -299,7 +381,6 @@ func (sc *LSPServiceClientBase) GetDependenciesDAG(ctx context.Context) (map[uri
 
 func (sc *LSPServiceClientBase) Handle(ctx context.Context, req *jsonrpc2.Request) (result interface{}, err error) {
 	// fmt.Printf("Base Handler!\n")
-
 	switch req.Method {
 	case "textDocument/publishDiagnostics":
 		var res protocol.PublishDiagnosticsParams
@@ -307,7 +388,6 @@ func (sc *LSPServiceClientBase) Handle(ctx context.Context, req *jsonrpc2.Reques
 		if err != nil {
 			return nil, err
 		}
-
 		// fmt.Printf("Fake wait.\n")
 		// time.Sleep(3 * time.Second)
 
@@ -450,7 +530,6 @@ func (sc *LSPServiceClientBase) GetAllReferences(ctx context.Context, location p
 	if err != nil {
 		fmt.Printf("Error rpc: %v", err)
 	}
-
 	return res
 }
 
