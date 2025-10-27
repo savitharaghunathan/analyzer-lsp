@@ -15,6 +15,7 @@ import (
 	"github.com/hashicorp/go-version"
 	"github.com/konveyor/analyzer-lsp/engine"
 	"github.com/konveyor/analyzer-lsp/engine/labels"
+	jsonrpc2 "github.com/konveyor/analyzer-lsp/jsonrpc2_v2"
 	"github.com/konveyor/analyzer-lsp/output/v1/konveyor"
 	"github.com/konveyor/analyzer-lsp/tracing"
 	jsonschema "github.com/swaggest/jsonschema-go"
@@ -36,6 +37,7 @@ const (
 	LspServerPathConfigKey = "lspServerPath"
 	IncludedPathsConfigKey = "includedPaths"
 	ExcludedDirsConfigKey  = "excludedDirs"
+	EncodingConfigKey      = "encoding"
 )
 
 // We need to make these Vars, because you can not take a pointer of the constant.
@@ -87,6 +89,7 @@ type Config struct {
 	Name         string       `yaml:"name,omitempty" json:"name,omitempty"`
 	BinaryPath   string       `yaml:"binaryPath,omitempty" json:"binaryPath,omitempty"`
 	Address      string       `yaml:"address,omitempty" json:"address,omitempty"`
+	UseSocket    bool         `yaml:"useSocket,omitempty" json:"useSocket,omitempty"`
 	CertPath     string       `yaml:"certPath,omitempty" json:"certPath,omitempty"`
 	JWTToken     string       `yaml:"jwtToken,omitempty" json:"jwtToken,omitempty"`
 	Proxy        *Proxy       `yaml:"proxyConfig,omitempty" json:"proxyConfig,omitempty"`
@@ -148,11 +151,17 @@ type InitConfig struct {
 
 	// This will be unusable connecting over a network but can be used in code.
 	RPC RPCClient `yaml:"-" json:"-"`
+
+	PipeName string `yaml:"pipeName" json:"pipeName"`
+
+	// Given a pipe name for the init config, we will use that pipe and connect to an already inited provider.
+	Initialized bool `yaml:"initialized" json:"initialized"`
 }
 
 type RPCClient interface {
-	Call(context.Context, string, interface{}, interface{}) error
-	Notify(context.Context, string, interface{}) error
+	Call(context.Context, string, any) *jsonrpc2.AsyncCall
+	Notify(context.Context, string, any) error
+	Close() error
 }
 
 func GetConfig(filepath string) ([]Config, error) {

@@ -15,12 +15,13 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/hashicorp/go-version"
 	"github.com/konveyor/analyzer-lsp/engine/labels"
-	"github.com/konveyor/analyzer-lsp/jsonrpc2"
+	jsonrpc2 "github.com/konveyor/analyzer-lsp/jsonrpc2_v2"
 	"github.com/konveyor/analyzer-lsp/lsp/protocol"
 	"github.com/konveyor/analyzer-lsp/provider"
 	"go.lsp.dev/uri"
@@ -68,7 +69,7 @@ func (p *javaServiceClient) Evaluate(ctx context.Context, cap string, conditionI
 		return provider.ProviderEvaluateResponse{}, fmt.Errorf("unable to get query info: %v", err)
 	}
 	// filepaths get rendered as a string and must be converted
-	if cond.Referenced.Filepaths != nil && len(cond.Referenced.Filepaths) > 0 {
+	if len(cond.Referenced.Filepaths) > 0 {
 		cond.Referenced.Filepaths = strings.Split(cond.Referenced.Filepaths[0], " ")
 	}
 
@@ -187,7 +188,7 @@ func (p *javaServiceClient) GetAllSymbols(ctx context.Context, c javaCondition, 
 	defer p.activeRPCCalls.Done()
 
 	timeOutCtx, _ := context.WithTimeout(ctx, timeout)
-	err = p.rpc.Call(timeOutCtx, "workspace/executeCommand", wsp, &refs)
+	err = p.rpc.Call(timeOutCtx, "workspace/executeCommand", wsp).Await(timeOutCtx, &refs)
 	if err != nil {
 		if jsonrpc2.IsRPCClosed(err) {
 			log.Error(err, "connection to the language server is closed, language server is not running")
@@ -250,7 +251,7 @@ func (p *javaServiceClient) GetAllReferences(ctx context.Context, symbol protoco
 	defer p.activeRPCCalls.Done()
 
 	res := []protocol.Location{}
-	err := p.rpc.Call(ctx, "textDocument/references", params, &res)
+	err := p.rpc.Call(ctx, "textDocument/references", params).Await(ctx, &res)
 	if err != nil {
 		if jsonrpc2.IsRPCClosed(err) {
 			p.log.Error(err, "connection to the language server is closed, language server is not running")
@@ -271,10 +272,15 @@ func (p *javaServiceClient) Stop() {
 	if err != nil {
 		p.log.Error(err, "failed to gracefully shutdown java provider")
 	}
-	p.cancelFunc()
 	err = p.cmd.Wait()
 	if err != nil {
-		p.log.Info("stopping java provider", "error", err)
+		if isSafeErr(err) {
+			p.log.Info("java provider stopped")
+		} else {
+			p.log.Error(err, "java provider stopped with error")
+		}
+	} else {
+		p.log.Info("java provider stopped")
 	}
 
 	if len(p.cleanExplodedBins) > 0 {
@@ -303,7 +309,7 @@ func (p *javaServiceClient) shutdown() error {
 	}
 
 	var shutdownResult interface{}
-	err := p.rpc.Call(shutdownCtx, "shutdown", nil, &shutdownResult)
+	err := p.rpc.Call(shutdownCtx, "shutdown", nil).Await(shutdownCtx, &shutdownResult)
 	if err != nil {
 		p.log.Error(err, "failed to send shutdown request to language server")
 		return err
@@ -314,6 +320,22 @@ func (p *javaServiceClient) shutdown() error {
 		return err
 	}
 	return nil
+}
+
+func isSafeErr(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
+		if status, ok := exitError.Sys().(syscall.WaitStatus); ok {
+			if status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (p *javaServiceClient) initialization(ctx context.Context) {
@@ -386,7 +408,8 @@ func (p *javaServiceClient) initialization(ctx context.Context) {
 
 	var result protocol.InitializeResult
 	for i := 0; i < 10; i++ {
-		if err := p.rpc.Call(ctx, "initialize", params, &result); err != nil {
+		err := p.rpc.Call(ctx, "initialize", params).Await(ctx, &result)
+		if err != nil {
 			if jsonrpc2.IsRPCClosed(err) {
 				p.log.Error(err, "connection to the language server is closed, language server is not running")
 			} else {
@@ -487,6 +510,8 @@ func (s *javaServiceClient) GetGradleVersion(ctx context.Context) (version.Versi
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// if executing with 8 we get an error, try with 17
+		cmd = exec.CommandContext(ctx, exe, args...)
+		cmd.Dir = s.config.Location
 		cmd.Env = append(cmd.Env, fmt.Sprintf("JAVA_HOME=%s", os.Getenv("JAVA_HOME")))
 		output, err = cmd.CombinedOutput()
 		if err != nil {
